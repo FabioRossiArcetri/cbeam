@@ -23,10 +23,14 @@ from cbeam import FEval
 
 from scipy.interpolate import make_interp_spline # Ensure this is imported
 
+
 xp = get_xp()
 backend = get_backend()
 
 if backend == "jax":
+    import jax
+    import jax.numpy as jnp
+    from jax.experimental.ode import odeint   # or use diffrax if you want more control
     normcmap = xp.zeros([256, 4])
     normcmap = normcmap.at[:, 3].set(xp.linspace(0, 1, 256)[::-1])
 else:
@@ -231,54 +235,76 @@ class Propagator:
     # alias
     prop_setup = characterize
 
-    def propagate(self, u0, zi=None, zf=None):
-        """ propagate a launch wavefront, expressed in the basis of initial eigenmodes, to z = zf 
-        
-        ARGS:
-            u0: the launch field, expressed as mode amplitudes of the initial eigenmode basis.
-            zi: the initial z coordinate corresponding to u0. if None, use the initial z value used in characterize().
-            zf: the final z coordinate to propagate through to. if None, use the final z value used in characterize().
 
-        RETURNS:
-            (tuple): a tuple containing:
-                - zs: the array of z values used by the ODE solver
-                - u: the mode amplitudes of the wavefront, evaluated along za, with :math:`e^{i\\beta_j z}` phase factored *out*.
-                - uf: the final mode amplitudes of the wavefront, with :math:`e^{i\\beta_j z}` phase factored *in*.
-        """
+    def propagate(self, u0, zi=None, zf=None):
         assert self.zs is not None, "no propagation data detected ... run characterize() or load() first"
         if zi is None:
-            zi = self.zs[0]
+            zi = float(self.zs[0])
         if zf is None:
-            zf = self.zs[-1]
+            zf = float(self.zs[-1])
 
-        # z invariant case
+
         if len(self.zs) == 1:
             return self.zs, self.xp.array([u0]), self.apply_phase(u0, zf, zi)
-
         if zi > zf:
             return self.backpropagate(u0, zi, zf)
 
-        u0 = self.xp.array(u0, dtype=self.xp.complex128)
-    
-        def deriv(z, u):
-            neffs = self.get_neff(z)
-            phases = (self.k * (self.get_int_neff(z) - self.get_int_neff(zi))) % (2 * self.xp.pi)
-            cmat = self.get_cmat(z)
-            phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
-            ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
-            if self.WKB: 
-                ddz += self.WKB_cor(z) * u
-            return ddz
-        
-        sol = solve_ivp(deriv, (zi, zf), u0, method=self.solver, rtol=1e-12, atol=1e-10)
-        # multiply by phase factors
-
-
+        # ========================= JAX CODEPATH =====================
         if self.backend == "jax":
-            # sol.ys shape: (n_saved, n_modes)
-            uf = self.apply_phase(sol.ys[-1], sol.ts[-1])
-            return sol.ts, sol.ys, uf          # sol.ys already (n_saved, n_modes)
-        else:
+            import jax
+            import jax.numpy as jnp
+
+            z_grid = jnp.asarray(self.zs)
+            neffs_grid = jnp.asarray(self.neffs)         # (n_z, n_modes)
+            int_neffs_grid = jnp.cumsum(neffs_grid, axis=0) * (z_grid[1] - z_grid[0])  # Approximate integral by cum-trapezoid!
+            cmats_grid = jnp.asarray(self.cmats)         # (n_z, n_modes, n_modes)
+            k_const = self.k
+
+            def get_interp1d(grid, values, z):
+                # grid: (...,), values: (len(grid), ...), z: scalar
+                idx = jnp.searchsorted(grid, z, side='left')
+                idx = jnp.clip(idx, 1, len(grid) - 1)
+                x0, x1 = grid[idx - 1], grid[idx]
+                y0, y1 = values[idx - 1], values[idx]
+                t = (z - x0) / (x1 - x0 + 1e-12)
+                return y0 + t * (y1 - y0)
+
+            @jax.jit
+            def ode_deriv(u, z):
+                neffs = get_interp1d(z_grid, neffs_grid, z)  # (n_modes,)
+                int_neff_here = get_interp1d(z_grid, int_neffs_grid, z)
+                int_neff_zi = get_interp1d(z_grid, int_neffs_grid, zi)
+                phases = (k_const * (int_neff_here - int_neff_zi)) % (2 * jnp.pi)
+                cmat = get_interp1d(z_grid, cmats_grid, z)  # (n_modes, n_modes)
+                phase_mat = jnp.exp(1.j * (phases[None, :] - phases[:, None]))
+                ddz = -1. / neffs * jnp.dot(phase_mat * cmat, u * neffs)
+                # Optionally: add WKB correction if you have a JAX version here
+                return ddz        
+
+            num_steps = 400
+            z_span = jnp.linspace(zi, zf, num_steps)
+            u0_jax = jnp.asarray(u0, dtype=jnp.complex128)
+
+            us = jax.experimental.ode.odeint(ode_deriv, u0_jax, z_span)
+            int_neff_zf = get_interp1d(z_grid, int_neffs_grid, zf)
+            int_neff_zi = get_interp1d(z_grid, int_neffs_grid, zi)
+            phases = jnp.exp(1.j * k_const * (int_neff_zf - int_neff_zi))
+            uf = us[-1] * phases
+            return z_span, us, uf
+
+        else:            
+           
+            u0 = self.xp.array(u0, dtype=self.xp.complex128)
+            def deriv(z, u):
+                neffs = self.get_neff(z)
+                phases = (self.k * (self.get_int_neff(z) - self.get_int_neff(zi))) % (2 * self.xp.pi)
+                cmat = self.get_cmat(z)
+                phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
+                ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
+                if self.WKB: 
+                    ddz += self.WKB_cor(z) * u
+                return ddz
+            sol = solve_ivp(deriv, (zi, zf), u0, method=self.solver, rtol=1e-12, atol=1e-10)
             uf = self.apply_phase(sol.y[:, -1], sol.t[-1])
             return sol.t, sol.y.T, uf
 
@@ -296,33 +322,77 @@ class Propagator:
         phase = self.xp.exp(1.j * self.k * self.xp.array(self.get_int_neff(z) - self.get_int_neff(zi)))
         return u * phase
     
+
     def backpropagate(self, u0, zf=None, zi=None):
-        """ propagate a wavefront from the back of the waveguide to the front """
-        
-        u0 = self.xp.array(u0, dtype=self.xp.complex128)
         if zi is None:
             zi = self.zs[0]
         if zf is None:
             zf = self.zs[-1]
 
-        def deriv(z, u):
-            zp = self.zs[-1] - z
-            neffs = self.get_neff(zp)
-            phases = (self.k * (self.get_int_neff(zp) - self.get_int_neff(zf))) % (2 * self.xp.pi)
-            cmat = self.get_cmat(zp)
-            phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
-            ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
-            if self.WKB: 
-                ddz += self.WKB_cor(zp) * u
-            return -ddz
-
-        sol = solve_ivp(deriv, (self.zs[-1] - zf, self.zs[-1] - zi), u0, method=self.solver, rtol=1e-12, atol=1e-10)
-        # multiply by phase factors
-        
         if self.backend == "jax":
-            uf = self.apply_phase(sol.ys[-1], zi, zf)
-            return self.zs[-1] - sol.ts, sol.ys, uf
+
+            import jax
+            import jax.numpy as jnp
+
+            z_grid = jnp.asarray(self.zs)
+            neffs_grid = jnp.asarray(self.neffs)
+            int_neffs_grid = jnp.cumsum(neffs_grid, axis=0) * (z_grid[1] - z_grid[0])
+            cmats_grid = jnp.asarray(self.cmats)
+            k_const = self.k
+
+            def get_interp1d(grid, values, z):
+                idx = jnp.searchsorted(grid, z, side='left')
+                idx = jnp.clip(idx, 1, len(grid) - 1)
+                x0, x1 = grid[idx - 1], grid[idx]
+                y0, y1 = values[idx - 1], values[idx]
+                t = (z - x0) / (x1 - x0 + 1e-12)
+                return y0 + t * (y1 - y0)
+
+            @jax.jit
+            def ode_deriv(u, z):
+                zp = self.zs[-1] - z
+                neffs = get_interp1d(z_grid, neffs_grid, zp)
+                int_neff_here = get_interp1d(z_grid, int_neffs_grid, zp)
+                int_neff_zf = get_interp1d(z_grid, int_neffs_grid, zf)
+                phases = (k_const * (int_neff_here - int_neff_zf)) % (2 * jnp.pi)
+                cmat = get_interp1d(z_grid, cmats_grid, zp)
+                phase_mat = jnp.exp(1.j * (phases[None, :] - phases[:, None]))
+                ddz = -1. / neffs * jnp.dot(phase_mat * cmat, u * neffs)
+                return -ddz
+
+            num_steps = 400
+            z_span = jnp.linspace(self.zs[-1] - zf, self.zs[-1] - zi, num_steps)
+            u0_jax = jnp.asarray(u0, dtype=jnp.complex128)
+
+            us = jax.experimental.ode.odeint(ode_deriv, u0_jax, z_span)
+            # Forward phase at output
+            int_neff_zi = get_interp1d(z_grid, int_neffs_grid, zi)
+            int_neff_zf = get_interp1d(z_grid, int_neffs_grid, zf)
+            phases = jnp.exp(1.j * k_const * (int_neff_zi - int_neff_zf))
+            uf = us[-1] * phases
+            back_zs = self.zs[-1] - z_span
+            return back_zs, us, uf
+
         else:
+            # NUMPY/SciPy fallback
+            u0 = self.xp.array(u0, dtype=self.xp.complex128)
+            if zi is None:
+                zi = self.zs[0]
+            if zf is None:
+                zf = self.zs[-1]
+
+            def deriv(z, u):
+                zp = self.zs[-1] - z
+                neffs = self.get_neff(zp)
+                phases = (self.k * (self.get_int_neff(zp) - self.get_int_neff(zf))) % (2 * self.xp.pi)
+                cmat = self.get_cmat(zp)
+                phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
+                ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
+                if self.WKB:
+                    ddz += self.WKB_cor(zp) * u
+                return -ddz
+
+            sol = solve_ivp(deriv, (self.zs[-1] - zf, self.zs[-1] - zi), u0, method=self.solver, rtol=1e-12, atol=1e-10)
             uf = self.apply_phase(sol.y[:, -1], zi, zf)
             return self.zs[-1] - sol.t, sol.y.T, uf
 
@@ -1322,10 +1392,11 @@ class Propagator:
         if plot:
             plt.show()
         return slider # a reference to the slider needs to be preserved to prevent gc :/
-    #endregion
+
+    
 
 class ChainPropagator(Propagator):
-    """ a ChainPropagator is a series of Propagators connected `end-to-end`. """
+    """ a ChainPropagator is a series of Propagators connected end-to-end. """
 
     def __init__(self, propagators: list):
         self.propagators = propagators
@@ -1347,45 +1418,49 @@ class ChainPropagator(Propagator):
         return self.get_prop(z).get_v(z)
 
     def get_prop(self, z):
-        # 1. Compute the split position index
         idx = max(0, bisect_left(self.z_breaks, z) - 1)
-        
-        # 2. Safety Valve: Pin it so it can never overflow the actual list size
         max_valid_idx = len(self.propagators) - 1
         idx = min(idx, max_valid_idx)
-        
         return self.propagators[idx]
     
-
     def propagate(self, u0, zi=None, zf=None):
         if zi is None:
             zi = self.propagators[0].zs[0]
         if zf is None:
             zf = self.propagators[-1].zs[-1]
-        
-        u = self.xp.array(u0)
 
-        all_zs = None
-        all_us = None
-
+        xp = self.xp  # Use np or jax.numpy as appropriate
+        u = xp.array(u0)
+        all_zs = []
+        all_us = []
         z = zi
 
-        while z != zf:
-            p = self.get_prop(z + 1e-6) # a little cheap lol
-            if zf >= p.zs[-1]:
-                zs, us, u = p.propagate(u, z, None)
+        first = True
+        # Use a robust float comparison; avoid infinite loops
+        while z < zf - 1e-10:
+            p = self.get_prop(z + 1e-8)  # bump slightly to avoid fencepost
+            segment_end = min(p.zs[-1], zf)
+            # If at boundary already, just advance to avoid looping forever
+            if segment_end - z < 1e-10:
+                z = segment_end
+                continue
+            zs, us, u = p.propagate(u, z, segment_end)
+            # Defensive: ensure progress
+            if float(zs[-1]) <= z:
+                raise RuntimeError(f"Propagate did not advance: current z {z} zs[-1] {zs[-1]}")
+            # Concatenate, avoiding duplicate at joints
+            if first:
+                all_zs.append(zs)
+                all_us.append(us)
+                first = False
             else:
-                zs, us, u = p.propagate(u, z, zf)
-            z = zs[-1]
-            
-            if all_zs is None:
-                all_zs = zs
-                all_us = us
-            else:
-                all_zs = self.xp.concatenate((all_zs, zs))
-                all_us = self.xp.concatenate((all_us, us))
-        
-        return all_zs, all_us, u
+                all_zs.append(zs[1:])
+                all_us.append(us[1:])
+            z = float(zs[-1])
+
+        zs_full = xp.concatenate(all_zs)
+        us_full = xp.concatenate(all_us)
+        return zs_full, us_full, u
 
     def to_channel_basis(self, uf, z=None):
         if z is None:
@@ -1394,3 +1469,4 @@ class ChainPropagator(Propagator):
 
     def make_field(self, mode_amps, z, plot=False, apply_phase=True):
         return self.get_prop(z).make_field(mode_amps, z, plot, apply_phase)
+    
