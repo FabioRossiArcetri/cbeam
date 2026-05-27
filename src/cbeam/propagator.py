@@ -1,57 +1,74 @@
 from __future__ import annotations
-import numpy as np,copy,time,os
-from wavesolve.fe_solver import solve_waveguide,get_eff_index,construct_B,plot_scalar_mode
-from cbeam.waveguide import load_meshio_mesh,Waveguide,plot_mesh
-from scipy.interpolate import UnivariateSpline,interp1d,CubicSpline
-from cbeam import FEval
-from scipy.integrate import solve_ivp
-import matplotlib.pyplot as plt
-from matplotlib.tri import Triangulation,CubicTriInterpolator,LinearTriInterpolator
-from matplotlib.widgets import Slider
-from matplotlib.colors import ListedColormap
-from typing import Union
-from bisect import bisect_left
 
-normcmap = np.zeros([256, 4])
-normcmap[:, 3] = np.linspace(0, 1, 256)[::-1]
+import copy
+import os
+import time
+from bisect import bisect_left
+from typing import Union
+
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+from matplotlib.tri import Triangulation
+from matplotlib.widgets import Slider
+
+from .backend import (
+    get_xp, get_backend,
+    solve_ivp, interp1d, CubicSpline, UnivariateSpline,
+    _JAXCubicSpline,  # add this
+)
+
+from wavesolve.fe_solver import solve_waveguide, get_eff_index, construct_B, plot_scalar_mode
+from cbeam.waveguide import load_meshio_mesh, Waveguide, plot_mesh
+from cbeam import FEval
+
+from scipy.interpolate import make_interp_spline # Ensure this is imported
+
+xp = get_xp()
+backend = get_backend()
+
+if backend == "jax":
+    normcmap = xp.zeros([256, 4])
+    normcmap = normcmap.at[:, 3].set(xp.linspace(0, 1, 256)[::-1])
+else:
+    normcmap = xp.zeros([256, 4])
+    normcmap[:, 3] = xp.linspace(0, 1, 256)[::-1]
+
 normcmap = ListedColormap(normcmap)
 
-def plot_cfield(field,mesh,fig=None,ax=None,show_mesh=False,res=1.,xlim=None,ylim=None):
+def plot_cfield(field, mesh, fig=None, ax=None, show_mesh=False, res=1., xlim=None, ylim=None):
     show = False
     if ax is None:
-        fig,ax = plt.subplots(1,1)
+        fig, ax = plt.subplots(1, 1)
         show = True
-
-    xm = np.max(mesh.points[:,0])
-    ym = np.max(mesh.points[:,1])
-    xlim = (-xm,xm) if xlim is None else xlim
-    ylim = (-ym,ym) if ylim is None else ylim
-    xa = np.arange(*xlim,res,dtype=np.float64)
-    ya = np.arange(*ylim,res,dtype=np.float64)
-    if not hasattr(mesh,'tree'):
+    xm = xp.max(mesh.points[:, 0])
+    ym = xp.max(mesh.points[:, 1])
+    xlim = (-xm, xm) if xlim is None else xlim
+    ylim = (-ym, ym) if ylim is None else ylim
+    xa = xp.arange(*xlim, res, dtype=xp.float64)
+    ya = xp.arange(*ylim, res, dtype=xp.float64)
+    if not hasattr(mesh, "tree"):
         FEval.sort_mesh(mesh)
-    fgrid = np.array(FEval.evaluate_grid(xa,ya,field,mesh.tree)).T
-    alphas = np.abs(fgrid)
-    alphas /= np.max(alphas)
-    ax.set_facecolor('k')
-    im = ax.imshow(np.angle(fgrid),extent=(*xlim,*ylim),cmap="hsv",vmin=-np.pi,vmax=np.pi,origin="lower")
-    ax.imshow(alphas,extent=(*xlim,*ylim),cmap=normcmap,interpolation="bicubic",origin="lower")
-
+    fgrid = xp.array(FEval.evaluate_grid(xa, ya, field, mesh.tree)).T
+    alphas = xp.abs(fgrid)
+    alphas /= xp.max(alphas)
+    ax.set_facecolor("k")
+    im = ax.imshow(xp.angle(fgrid), extent=(*xlim, *ylim), cmap="hsv",
+                   vmin=-xp.pi, vmax=xp.pi, origin="lower")
+    ax.imshow(alphas, extent=(*xlim, *ylim), cmap=normcmap, interpolation="bicubic", origin="lower")
     if show_mesh:
-        plot_mesh(mesh,plot_points=False,ax=ax,alpha=0.1,verbose=False)
-
+        plot_mesh(mesh, plot_points=False, ax=ax, alpha=0.1, verbose=False)
     ax.set_xlabel(r"$x$")
     ax.set_ylabel(r"$y$")
-    ax.set_aspect('equal')
+    ax.set_aspect("equal")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     if fig is not None:
-        fig.colorbar(im,ax=ax,label="phase")
+        fig.colorbar(im, ax=ax, label="phase")
     if show:
         plt.show()
     return im
 
-def plot_field(field,mesh,ax=None,show_mesh=False):
+def plot_field(field, mesh, ax=None, show_mesh=False):
     """ plot a real-valued finite element field, evaluated on the points of the mesh corresponding to the waveguide cross-section at z
     
     ARGS:
@@ -60,7 +77,7 @@ def plot_field(field,mesh,ax=None,show_mesh=False):
         ax (opt.): a matplotlib axis where the plot should go. if not None, you will need to call matplotlib.pyplot.show() manually
         show_mesh (opt.): whether or not to draw the mesh in the plot
     """
-    plot_scalar_mode(mesh,field,show_mesh,ax)
+    plot_scalar_mode(mesh, field, show_mesh, ax)
 
 class Propagator:
     """ class for coupled mode propagation of tapered waveguides """
@@ -86,7 +103,7 @@ class Propagator:
     #: float: minimum z step value when computing effective indices
     min_zstep_neff = 10. 
     #: float: maximum z step value when computing modes or effective indices
-    max_zstep = np.inf
+    max_zstep = xp.inf
     #: float: starting z step
     init_zstep = 10.
 
@@ -105,7 +122,7 @@ class Propagator:
     #: str: mode for coupling matrix calculation, "from_wvg" or "from_interp"
     cmat_correction_mode = "from_interp"
 
-    def __init__(self,wl,wvg:Union[None,Waveguide]=None,Nmax=None,save_dir=None):
+    def __init__(self, wl, wvg: Union[None, Waveguide] = None, Nmax=None, save_dir=None):
         """
         ARGS:
         wl: propagation wavelength
@@ -113,10 +130,12 @@ class Propagator:
         Nmax: the number of propagating modes throughout the waveguide
         save_dir: directory path to save output computations. default is './data/'
         """
+        self.backend = get_backend()
+        self.xp = get_xp()
         self.wvg = wvg
         self.wl = wl
         self.Nmax = Nmax
-        self.k = 2*np.pi/wl
+        self.k = 2 * self.xp.pi / wl
 
         self.cmats = None
         self.neffs = None
@@ -128,9 +147,8 @@ class Propagator:
         self.neffs_funcs = None
         self.get_v = None
         self.points0 = None
-        self.mesh = None
-
         self.channel_basis_matrix = None
+        self.meshpoints = None
 
         if save_dir is None:
             self.save_dir = './data'
@@ -141,7 +159,7 @@ class Propagator:
     
     #region main functions
 
-    def solve_at(self,z=0,mesh=None):
+    def solve_at(self, z=0, mesh=None):
         """ solve for waveguide modes at given z value. returns effective indices and eigenmodes.
         also stores the finite element mesh used to self.mesh
         
@@ -157,11 +175,11 @@ class Propagator:
         """
         mesh = self.make_mesh_at_z(z) if mesh is None else mesh
         IOR_dict = self.wvg.assign_IOR()
-        w,v,N = solve_waveguide(mesh,self.wl,IOR_dict,sparse=True,Nmax=self.Nmax)
+        w, v, N = solve_waveguide(mesh, self.wl, IOR_dict, sparse=True, Nmax=self.Nmax)
         self.mesh = mesh
-        return get_eff_index(self.wl,w),v
+        return get_eff_index(self.wl, w), v
 
-    def characterize(self,zi=None,zf=None,mesh=None,tag='',save=False):
+    def characterize(self, zi=None, zf=None, mesh=None, tag='', save=False):
         """ compute the modes and coupling coefficients of the currently loaded waveguide,
         and set things up for propagation. for reference, this function calls compute_modes() 
         and then compute_cmat().
@@ -184,36 +202,36 @@ class Propagator:
         
         # z invariant wvg handling
         if self.wvg.z_invariant:
-            ps = "_"+tag if tag is not None else ""
+            ps = "_" + tag if tag is not None else ""
             if save:
-                meshwriteto=self.save_dir+"/meshes/mesh"+ps
+                meshwriteto = self.save_dir + "/meshes/mesh" + ps
             else:
-                meshwriteto=None
+                meshwriteto = None
 
             self.mesh = self.generate_mesh(writeto=meshwriteto) if mesh is None else mesh
-            print("mesh has ",len(self.mesh.points)," points")
-            neff,v = self.solve_at(0)
-            zs = np.array([0.])
-            neffs = np.array([neff])
-            vs = np.array([v])
-            self.zs,self.neffs,self.vs = zs,neffs,vs
+            print("mesh has ", len(self.mesh.points), " points")
+            neff, v = self.solve_at(0)
+            zs = self.xp.array([0.])
+            neffs = self.xp.array([neff])
+            vs = self.xp.array([v])
+            self.zs, self.neffs, self.vs = zs, neffs, vs
             if save:
-                self.save(zs=zs,neffs=neffs,vs=vs,tag=tag)
+                self.save(zs=zs, neffs=neffs, vs=vs, tag=tag)
             self.make_interp_funcs_zinv()
-            return zs,neffs,vs,None
+            return zs, neffs, vs, None
 
         # normal handling
         start_time = time.time()
-        self.compute_modes(zi,zf,mesh,tag,save)
-        self.compute_cmats(save=save,tag=tag)
-        print("time elapsed: ",time.time()-start_time)
-        self.make_interp_funcs()
-        return self.zs , self.neffs , self.vs , self.cmats
+        self.compute_modes(zi, zf, mesh, tag, save)
+        self.compute_cmats(save=save, tag=tag)
+        print("time elapsed: ", time.time() - start_time)
+        self.make_interp_funcs(self.zs)
+        return self.zs, self.neffs, self.vs, self.cmats
 
     # alias
     prop_setup = characterize
 
-    def propagate(self,u0,zi=None,zf=None):
+    def propagate(self, u0, zi=None, zf=None):
         """ propagate a launch wavefront, expressed in the basis of initial eigenmodes, to z = zf 
         
         ARGS:
@@ -235,29 +253,36 @@ class Propagator:
 
         # z invariant case
         if len(self.zs) == 1:
-            return self.zs,np.array([u0]),self.apply_phase(u0,zf,zi)
+            return self.zs, self.xp.array([u0]), self.apply_phase(u0, zf, zi)
 
         if zi > zf:
-            return self.backpropagate(u0,zi,zf)
+            return self.backpropagate(u0, zi, zf)
 
-        u0 = np.array(u0,dtype=np.complex128)
+        u0 = self.xp.array(u0, dtype=self.xp.complex128)
     
-        def deriv(z,u):
+        def deriv(z, u):
             neffs = self.get_neff(z)
-            phases = (self.k * (self.get_int_neff(z)-self.get_int_neff(zi)))%(2*np.pi)
+            phases = (self.k * (self.get_int_neff(z) - self.get_int_neff(zi))) % (2 * self.xp.pi)
             cmat = self.get_cmat(z)
-            phase_mat = np.exp(1.j * (phases[None,:] - phases[:,None]))
-            ddz = -1./neffs*np.dot(phase_mat*cmat,u*neffs)
+            phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
+            ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
             if self.WKB: 
-                ddz += self.WKB_cor(z)*u
+                ddz += self.WKB_cor(z) * u
             return ddz
         
-        sol = solve_ivp(deriv,(zi,zf),u0,self.solver,rtol=1e-12,atol=1e-10)
+        sol = solve_ivp(deriv, (zi, zf), u0, method=self.solver, rtol=1e-12, atol=1e-10)
         # multiply by phase factors
-        uf = self.apply_phase(sol.y[:,-1],sol.t[-1])
-        return sol.t,sol.y.T,uf
 
-    def apply_phase(self,u,z,zi=None):
+
+        if self.backend == "jax":
+            # sol.ys shape: (n_saved, n_modes)
+            uf = self.apply_phase(sol.ys[-1], sol.ts[-1])
+            return sol.ts, sol.ys, uf          # sol.ys already (n_saved, n_modes)
+        else:
+            uf = self.apply_phase(sol.y[:, -1], sol.t[-1])
+            return sol.t, sol.y.T, uf
+
+    def apply_phase(self, u, z, zi=None):
         """ apply :math:`e^{i \\beta_j z}` phase variation to the mode amplitude of eigenmode j
         with propagation constant :math:`\\beta_j`.
         
@@ -268,38 +293,42 @@ class Propagator:
         """
         if zi is None:
             zi = self.zs[0]
-        phase = np.exp(1.j*self.k*np.array(self.get_int_neff(z)-self.get_int_neff(zi)))
-        return u*phase
+        phase = self.xp.exp(1.j * self.k * self.xp.array(self.get_int_neff(z) - self.get_int_neff(zi)))
+        return u * phase
     
-    def backpropagate(self,u0,zf=None,zi=None):
+    def backpropagate(self, u0, zf=None, zi=None):
         """ propagate a wavefront from the back of the waveguide to the front """
         
-        u0 = np.array(u0,dtype=np.complex128)
+        u0 = self.xp.array(u0, dtype=self.xp.complex128)
         if zi is None:
             zi = self.zs[0]
         if zf is None:
             zf = self.zs[-1]
 
-        def deriv(z,u):
+        def deriv(z, u):
             zp = self.zs[-1] - z
             neffs = self.get_neff(zp)
-            phases = (self.k * (self.get_int_neff(zp)-self.get_int_neff(zf)))%(2*np.pi)
+            phases = (self.k * (self.get_int_neff(zp) - self.get_int_neff(zf))) % (2 * self.xp.pi)
             cmat = self.get_cmat(zp)
-            phase_mat = np.exp(1.j * (phases[None,:] - phases[:,None]))
-            ddz = -1./neffs*np.dot(phase_mat*cmat,u*neffs)
+            phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
+            ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
             if self.WKB: 
-                ddz += self.WKB_cor(zp)*u
+                ddz += self.WKB_cor(zp) * u
             return -ddz
 
-        sol = solve_ivp(deriv,(self.zs[-1]-zf,self.zs[-1]-zi),u0,self.solver,rtol=1e-12,atol=1e-10)
+        sol = solve_ivp(deriv, (self.zs[-1] - zf, self.zs[-1] - zi), u0, method=self.solver, rtol=1e-12, atol=1e-10)
         # multiply by phase factors
-        uf = self.apply_phase(sol.y[:,-1],zi,zf)
-        return self.zs[-1]-sol.t,sol.y.T,uf
+        
+        if self.backend == "jax":
+            uf = self.apply_phase(sol.ys[-1], zi, zf)
+            return self.zs[-1] - sol.ts, sol.ys, uf
+        else:
+            uf = self.apply_phase(sol.y[:, -1], zi, zf)
+            return self.zs[-1] - sol.t, sol.y.T, uf
 
-    #endregion
 
     #region other setup funcs
-    def compute_neffs(self,zi=0,zf=None,mesh=None,tag='',save=False):
+    def compute_neffs(self, zi=0, zf=None, mesh=None, tag='', save=False):
         """ compute the effective refractive indices through a waveguide, using an adaptive step scheme. also saves interpolation functions to self.neffs_funcs
         
         ARGS:
@@ -320,15 +349,15 @@ class Propagator:
         zs = []
         vs = []
         self.wvg.update(0)
-        ps = "_"+tag if tag is not None else ""
+        ps = "_" + tag if tag is not None else ""
         if save:
-            meshwriteto=self.save_dir+"/meshes/mesh"+ps
+            meshwriteto = self.save_dir + "/meshes/mesh" + ps
         else:
-            meshwriteto=None
+            meshwriteto = None
         if mesh is None:
             mesh = self.generate_mesh(meshwriteto) # use default vals
         self.mesh = mesh
-        print("mesh has ",len(self.mesh.points)," points")
+        print("mesh has ", len(self.mesh.points), " points")
         zstep0 = self.init_zstep if self.fixed_zstep is None else self.fixed_zstep
         min_zstep = self.min_zstep_neff
         neff_interp = None
@@ -338,71 +367,74 @@ class Propagator:
         
         print("computing effective indices ...")
 
-        if zi==zf:
-            w,v,N = solve_waveguide(mesh,self.wl,IOR_dict,sparse=True,Nmax=self.Nmax)
-            return z , get_eff_index(self.wl,w) , v
+        if zi == zf:
+            w, v, N = solve_waveguide(mesh, self.wl, IOR_dict, sparse=True, Nmax=self.Nmax)
+            return z, get_eff_index(self.wl, w), v
 
         while True:
-            _mesh = self.wvg.transform_mesh(mesh,0,z)
-            w,v,N = solve_waveguide(_mesh,self.wl,IOR_dict,sparse=True,Nmax=self.Nmax)
-            neff = get_eff_index(self.wl,w)
-            if len(neffs)>0:
+            _mesh = self.wvg.transform_mesh(mesh, 0, z)
+            w, v, N = solve_waveguide(_mesh, self.wl, IOR_dict, sparse=True, Nmax=self.Nmax)
+            neff = get_eff_index(self.wl, w)
+            if len(neffs) > 0:
                 if len(neffs) == 1:
-                    self.track_modes(vs[-1],v,neffs[-1],neff)
-                elif 1<len(vs)<4:
+                    self.track_modes(vs[-1], v, neffs[-1], neff)
+                elif 1 < len(vs) < 4:
                     N = len(neffs)
-                    neff_interp = interp1d(zs[-N:],np.array(neffs)[-N:,:],kind=N-1,axis=0,fill_value="extrapolate")
-                    self.track_modes(vs[-1],v,neff_interp(z),neff)
+                    neff_interp = interp1d(zs[-N:], self.xp.array(neffs)[-N:, :], kind=N-1, axis=0, fill_value="extrapolate")
+                    self.track_modes(vs[-1], v, neff_interp(z), neff)
                 else:
-                    #neff_interp = interp1d(zs[-4:],np.array(neffs)[-4:,:],axis=0,kind=3,fill_value='extrapolate',assume_sorted=True)
-                    neff_interp = CubicSpline(zs[-4:],neffs[-4:],axis=0)
-                    self.track_modes(vs[-1],v,neff_interp(z),neff)
+                    neff_interp = CubicSpline(zs[-4:], neffs[-4:], axis=0)
+                    self.track_modes(vs[-1], v, neff_interp(z), neff)
 
-            if len(neffs)<4 or self.fixed_zstep:
+            if len(neffs) < 4 or self.fixed_zstep:
                 N = len(neffs)
                 neffs.append(neff)
                 zs.append(z)
                 vs.append(v)
-                print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z,zf,zstep0),end='',flush=True)
+                print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z, zf, zstep0), end='', flush=True)
                 if z == zf:
                     break
-                z = min(zf,z+zstep0)
+                z = min(zf, z + zstep0)
                 continue
             
-            refac=self._ref_fac_n(neff_interp(z),neff,neffs[-1])
+            refac = self._ref_fac_n(neff_interp(z), neff, neffs[-1])
             if refac >= 0 or zstep0 == min_zstep:
                 neffs.append(neff)
                 zs.append(z)
                 vs.append(v)
-                print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z,zf,zstep0),end='',flush=True)
+                print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z, zf, zstep0), end='', flush=True)
                 if z == zf:
                     break
                 if refac == 1:
-                    zstep0*=2
-                z = min(zf,z+zstep0)
+                    zstep0 *= 2
+                z = min(zf, z + zstep0)
             else:
-                print("\rcurrent z: {0} / {1}; tol. not met, reducing step        ".format(z,zf),end='',flush=True)   
+                print("\rcurrent z: {0} / {1}; tol. not met, reducing step        ".format(z, zf), end='', flush=True)   
                 z = zs[-1]
-                zstep0 = max(zstep0/2,min_zstep)
+                zstep0 = max(zstep0 / 2, min_zstep)
                 z += zstep0
         
-        neffs = np.array(neffs)
-        vs = np.array(vs)
+        neffs = self.xp.array(neffs)
+        vs = self.xp.array(vs)
         neff_funcs = []
-        zs = np.array(zs)
+        zs = self.xp.array(zs)
         for i in range(self.Nmax):
-            neff_funcs.append(UnivariateSpline(zs,neffs[:,i],s=0))
+            try:
+                neff_funcs.append(UnivariateSpline(zs, neffs[:, i], s=0))
+            except NotImplementedError:
+                print("Warning: UnivariateSpline not available in this backend. Using linear interpolation.")
+                neff_funcs.append(interp1d(zs, neffs[:, i], kind='linear'))
         self.neffs_funcs = neff_funcs
         self.neffs = neffs
         self.zs = zs
         self.vs = vs # these modes may be inaccurate if there are degeneracies
         if save:
-            self.save(zs,None,neffs,vs,tag=tag)
-        self.make_interp_funcs(make_cmat=False)
-        print("time elapsed: ",time.time()-start_time)
-        return zs , neffs
+            self.save(zs, None, neffs, vs, tag=tag)
+        self.make_interp_funcs(zs, make_cmat=False)
+        print("time elapsed: ", time.time() - start_time)
+        return zs, neffs
 
-    def compute_modes(self,zi=None,zf=None,mesh=None,tag='',save=False):
+    def compute_modes(self, zi=None, zf=None, mesh=None, tag='', save=False):
         """ compute the modes through the waveguide, using an adaptive stepping scheme. this requires
         greater accuracy in z than get_neffs() since mode shapes may change rapidly even if
         eigenvalues do not. stores initial mesh to self.mesh
@@ -440,62 +472,62 @@ class Propagator:
 
         meshpoints = []
 
-        ps = "_"+tag if tag is not None else ""
+        ps = "_" + tag if tag is not None else ""
 
         if save:
-            meshwriteto = self.save_dir+"/meshes/mesh"+ps
+            meshwriteto = self.save_dir + "/meshes/mesh" + ps
         else:
             meshwriteto = None            
 
         mesh = self.generate_mesh(writeto=meshwriteto) if mesh is None else mesh
-        print("mesh has ",len(mesh.points)," points")
+        print("mesh has ", len(mesh.points), " points")
         _mesh = copy.deepcopy(mesh)
         IOR_dict = self.wvg.assign_IOR()
         z = zi
         print("computing modes ...")
         while True:
-            self.wvg.transform_mesh(mesh,0,z,_mesh)
-            if len(vs)==0 and self.vs is not None and self.neffs is not None:
-                neff,v = self.neffs[0],self.vs[0]
+            self.wvg.transform_mesh(mesh, 0, z, _mesh)
+            if len(vs) == 0 and self.vs is not None and self.neffs is not None:
+                neff, v = self.neffs[0], self.vs[0]
             else:
-                w,v,N = solve_waveguide(_mesh,self.wl,IOR_dict,sparse=True,Nmax=self.Nmax)
-                neff = get_eff_index(self.wl,w)            
-            if len(neffs)>0:
+                w, v, N = solve_waveguide(_mesh, self.wl, IOR_dict, sparse=True, Nmax=self.Nmax)
+                neff = get_eff_index(self.wl, w)            
+            if len(neffs) > 0:
                 if len(neffs) == 1:
-                    self.track_modes(vs[-1],v,neffs[-1],neff)
-                elif 1<len(vs)<4:
+                    self.track_modes(vs[-1], v, neffs[-1], neff)
+                elif 1 < len(vs) < 4:
                     N = len(neffs)
-                    neff_interp = interp1d(zs[-N:],np.array(neffs)[-N:,:],kind=N-1,axis=0,fill_value="extrapolate")
-                    self.track_modes(vs[-1],v,neff_interp(z),neff)
+                    neff_interp = interp1d(zs[-N:], self.xp.array(neffs)[-N:, :], kind=N-1, axis=0, fill_value="extrapolate")
+                    self.track_modes(vs[-1], v, neff_interp(z), neff)
                 else:
-                    neff_interp = CubicSpline(zs[-4:], neffs[-4:], axis=0, extrapolate=True,bc_type='natural')
-                    self.track_modes(vs[-1],v,neff_interp(z),neff)
+                    neff_interp = CubicSpline(zs[-4:], neffs[-4:], axis=0, extrapolate=True, bc_type='natural')
+                    self.track_modes(vs[-1], v, neff_interp(z), neff)
             
             for gr in self.degen_groups:
-                self.avg_degen_neff(gr,neff)
+                self.avg_degen_neff(gr, neff)
             
             v[self.skipped_modes] = 0.
 
             # produce an average down version of modes to control adaptive stepping
             vdec = self.decimate(v)
-            if len(vs)<4 or fixed_step: # accept the first four computations
+            if len(vs) < 4 or fixed_step: # accept the first four computations
                 neffs.append(neff)
                 zs.append(z)
                 vs.append(v)
                 vs_dec.append(vdec)
                 if self.cmat_correction_mode == "from_interp" and not self.wvg.linear:
-                    meshpoints.append(np.copy(_mesh.points[:,:2]))
+                    meshpoints.append(self.xp.copy(_mesh.points[:, :2]))
 
-                print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z,zf,zstep0),end='',flush=True)
+                print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z, zf, zstep0), end='', flush=True)
                 if z == zf:
                     break
-                z = min(zf,z+zstep0)
+                z = min(zf, z + zstep0)
                 continue
             else:
                 # interpolate the modes
-                vinterp = CubicSpline(np.array(zs[-4:]), vs_dec[-4:] ,axis=0)
-                refac = self._ref_fac_v(vdec,vs_dec[-1],vinterp(z))
-                if refac>=0 or zstep0 == min_zstep:
+                vinterp = CubicSpline(self.xp.array(zs[-4:]), vs_dec[-4:], axis=0)
+                refac = self._ref_fac_v(vdec, vs_dec[-1], vinterp(z))
+                if refac >= 0 or zstep0 == min_zstep:
                     if not hit_min_zstep and zstep0 == min_zstep:
                         hit_min_zstep = True
                     neffs.append(neff)
@@ -503,38 +535,38 @@ class Propagator:
                     vs.append(v)
                     vs_dec.append(vdec)
                     if self.cmat_correction_mode == "from_interp" and not self.wvg.linear:
-                        meshpoints.append(np.copy(_mesh.points[:,:2]))
-                    print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z,zf,zstep0),end='',flush=True)
+                        meshpoints.append(self.xp.copy(_mesh.points[:, :2]))
+                    print("\rcurrent z: {0} / {1} ; current zstep: {2}        ".format(z, zf, zstep0), end='', flush=True)
                     if z == zf:
                         break
-                    if refac==1:
-                        zstep0 = min(max_zstep,zstep0*2)
-                    z = min(zf,z+zstep0)
+                    if refac == 1:
+                        zstep0 = min(max_zstep, zstep0 * 2)
+                    z = min(zf, z + zstep0)
                 else:
-                    print("\rcurrent z: {0} / {1}; tol. not met, reducing step        ".format(z,zf),end='',flush=True)   
+                    print("\rcurrent z: {0} / {1}; tol. not met, reducing step        ".format(z, zf), end='', flush=True)   
                     z = zs[-1] 
-                    zstep0 = max(zstep0/2,min_zstep)
-                    z = min(zf,z+zstep0)
+                    zstep0 = max(zstep0 / 2, min_zstep)
+                    z = min(zf, z + zstep0)
         
-        neffs = np.array(neffs)
-        vs = np.array(vs)
-        zs = np.array(zs)
+        neffs = self.xp.array(neffs)
+        vs = self.xp.array(vs)
+        zs = self.xp.array(zs)
         self.neffs = neffs
         self.zs = zs
         self.vs = vs
         self.mesh = mesh
         if self.wvg.linear:
-            meshpoints.append(mesh.points[:,:2])
-            meshpoints.append(_mesh.points[:,:2])
-        self.meshpoints = np.array(meshpoints)
+            meshpoints.append(mesh.points[:, :2])
+            meshpoints.append(_mesh.points[:, :2])
+        self.meshpoints = self.xp.array(meshpoints)
         if save:
-            self.save(zs,None,neffs,vs,self.meshpoints,tag=tag)
-        self.make_interp_funcs(zs,True,False,True)
+            self.save(zs, None, neffs, vs, self.meshpoints, tag=tag)
+        self.make_interp_funcs(zs, True, False, True)
         if hit_min_zstep:
             print("\nwarning: hit minimum z step when computing modes")
-        return zs,neffs,vs
+        return zs, neffs, vs
 
-    def load_init_conds(self,init_prop:Propagator,z=None):
+    def load_init_conds(self, init_prop: Propagator, z=None):
         """ load an eigenmode basis from init_prop as the initial basis for 
         this propagator's calculations.
 
@@ -553,7 +585,7 @@ class Propagator:
             self.vs.append(init_prop.get_v(z))
             self.neffs.append(init_prop.get_neff(z))
 
-    def compute_cmats(self,zs=None,vs=None,mesh=None,tag='',save=False):
+    def compute_cmats(self, zs=None, vs=None, mesh=None, tag='', save=False):
         """ compute the coupling coefficient matrices.
 
         ARGS:
@@ -571,28 +603,28 @@ class Propagator:
         mesh = self.mesh if mesh is None else mesh
         _mesh = copy.deepcopy(mesh)
         if _mesh.points.shape[1] == 3:
-            _mesh.points = _mesh.points[:,:2]
-        zi,zf = zs[0],zs[-1]
+            _mesh.points = _mesh.points[:, :2]
+        zi, zf = zs[0], zs[-1]
         print("\ncomputing coupling matrix ...")
-        vi = CubicSpline(zs,vs,axis=0)
+        vi = CubicSpline(zs, vs, axis=0)
 
         _linear = (len(self.meshpoints) == 2)
 
         dmeshdz = None
         if self.cmat_correction_mode == "from_interp":
             if _linear:
-                slope = (self.meshpoints[1]-self.meshpoints[0])/(zs[-1]-zs[0])
-                points = lambda z: slope*(z-zs[0]) + self.meshpoints[0]
+                slope = (self.meshpoints[1] - self.meshpoints[0]) / (zs[-1] - zs[0])
+                points = lambda z: slope * (z - zs[0]) + self.meshpoints[0]
                 dmeshdz = lambda z: slope
             else:
-                points = CubicSpline(zs,self.meshpoints,axis=0)
+                points = CubicSpline(zs, self.meshpoints, axis=0)
                 dmeshdz = points.derivative()
 
         dvdz = vi.derivative()
         cmats = []
-        points0 = mesh.points.T[:2,:]
-        for i,z in enumerate(zs):
-            print("\rcurrent z: {0} / {1}        ".format(z,zf),end='',flush=True)
+        points0 = mesh.points.T[:2, :]
+        for i, z in enumerate(zs):
+            print("\rcurrent z: {0} / {1}        ".format(z, zf), end='', flush=True)
             # the derivative measured by the interpolant comoves with mesh points
             # need to subtract out the x,y component to isolate partial z derivative
 
@@ -603,30 +635,30 @@ class Propagator:
                     _mesh.points[:] = self.meshpoints[i]
                 dxydz = dmeshdz(z)
             else:
-                self.wvg.transform_mesh(mesh,0,z,_mesh)
-                dxydz = np.array(self.wvg.deriv_transform(points0[0],points0[1],0,z)).T
+                self.wvg.transform_mesh(mesh, 0, z, _mesh)
+                dxydz = self.xp.array(self.wvg.deriv_transform(points0[0], points0[1], 0, z)).T
             
-            B = construct_B(_mesh,True)
-            dvdxy = FEval.transverse_gradient(vs[i],_mesh.cells[1].data,_mesh.points)
-            cor = np.sum(dxydz[None,:,:]*dvdxy,axis=2)
-            cmat = self.inner_product(dvdz(z)-cor,vs[i],B)
+            B = construct_B(_mesh, True)
+            dvdxy = FEval.transverse_gradient(vs[i], _mesh.cells[1].data, _mesh.points)
+            cor = self.xp.sum(dxydz[None, :, :] * dvdxy, axis=2)
+            cmat = self.inner_product(dvdz(z) - cor, vs[i], B)
             cmats.append(cmat)
-        cmats = np.array(cmats)  
+        cmats = self.xp.array(cmats)  
         self.cmats = cmats   
-        self.make_interp_funcs(make_cmat=True)
+        self.make_interp_funcs(zs, make_cmat=True)
         if save:
-            self.save(cmats=cmats,tag=tag) 
+            self.save(cmats=cmats, tag=tag) 
         return cmats
 
-    def make_sign_consistent(self,v,_v):
+    def make_sign_consistent(self, v, _v):
         """ alter the eigenmodes _v, assumed to be similar to v, so that they 
         have consistent overall sign with v. """
 
-        flip_mask = np.sum(np.abs(v-_v),axis=1) > np.sum(np.abs(v+_v),axis=1)
+        flip_mask = self.xp.sum(self.xp.abs(v - _v), axis=1) > self.xp.sum(self.xp.abs(v + _v), axis=1)
         _v[flip_mask] *= -1
         return flip_mask
     
-    def inner_product(self,v1,v2,B):
+    def inner_product(self, v1, v2, B):
         """ compute the inner product (or overlap integral) between fields v1 & v2, which are on the same mesh.
             this requires mesh information, either by passing in the mesh explicitly or by 
             passing in the B matrix. this is the matrix on the RHS of the generalized
@@ -638,27 +670,27 @@ class Propagator:
         # using dot() (as opposed to np.tensordot) gives a speedup when B is sparse
         return B.dot(v1.T).T.dot(v2.T)
 
-    def _ref_fac_v(self,v,vlast,vi):
-        resids = v-vi
+    def _ref_fac_v(self, v, vlast, vi):
+        resids = v - vi
         resids[self.skipped_modes] = 0.
-        err = np.sqrt(np.mean(np.power(resids,2)))
-        tol = max(np.sqrt(np.mean(np.power(v-vlast,2)))/100.,1e-7) * np.power(10.,-np.float64(self.z_acc))
-        if err < 0.1*tol:
+        err = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
+        tol = max(self.xp.sqrt(self.xp.mean(self.xp.power(v - vlast, 2))) / 100., 1e-7) * self.xp.power(10., -float(self.z_acc))
+        if err < 0.1 * tol:
             return 1
         elif err > tol:
             return -1
         else:
             return 0
     
-    def _ref_fac_n(self,ninterp,n,nlast):
-        resids = ninterp-n
+    def _ref_fac_n(self, ninterp, n, nlast):
+        resids = ninterp - n
         resids[self.skipped_modes] = 0.
-        err = np.sqrt(np.mean(np.power(resids,2)))
-        nsort = sorted(nlast,reverse=True)
-        tol = max((nsort[0]-nsort[1])/100.,1e-9) * np.power(10.,-np.float64(self.z_acc))
-        if 0.1*tol < err < tol:
+        err = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
+        nsort = sorted(nlast, reverse=True)
+        tol = max((nsort[0] - nsort[1]) / 100., 1e-9) * self.xp.power(10., -float(self.z_acc))
+        if 0.1 * tol < err < tol:
             return 0
-        elif err < 0.1* tol:
+        elif err < 0.1 * tol:
             return 1
         else:
             return -1
@@ -668,151 +700,186 @@ class Propagator:
     #region i/o utility
 
     def check_and_make_folders(self):
-        if not os.path.exists(self.save_dir):
-            os.makedirs(self.save_dir)
-        if not os.path.exists(self.save_dir+'/eigenmodes'):
-            os.makedirs(self.save_dir+'/eigenmodes')
-        if not os.path.exists(self.save_dir+'/eigenvalues'):
-            os.makedirs(self.save_dir+'/eigenvalues')
-        if not os.path.exists(self.save_dir+'/cplcoeffs'):
-            os.makedirs(self.save_dir+'/cplcoeffs')
-        if not os.path.exists(self.save_dir+'/zvals'):
-            os.makedirs(self.save_dir+'/zvals')
-        if not os.path.exists(self.save_dir+'/meshes'):
-            os.makedirs(self.save_dir+'/meshes')
-        if not os.path.exists(self.save_dir+'/meshpoints'):
-            os.makedirs(self.save_dir+'/meshpoints')
+        for sq in ['', 'eigenmodes', 'eigenvalues', 'cplcoeffs', 'zvals', 'meshes', 'meshpoints']:
+            d = os.path.join(self.save_dir, sq)
+            if not os.path.exists(d):
+                os.makedirs(d)
 
-    def save(self,zs=None,cmats=None,neffs=None,vs=None,meshpoints=None,tag=""):
-        ps = "" if tag == "" else "_"+tag
+    def save(self, zs=None, cmats=None, neffs=None, vs=None, meshpoints=None, tag=""):
+        ps = "" if tag == "" else "_" + tag
         if vs is not None:
-            vs = np.array(vs) # eigenmode array is (KxNxM) for M mesh points, N eigenmodes, and K z values
-            np.save(self.save_dir+'/eigenmodes/eigenmodes'+ps,vs)
+            vs = self.xp.array(vs) # eigenmode array is (KxNxM) for M mesh points, N eigenmodes, and K z values
+            self.xp.save(self.save_dir + '/eigenmodes/eigenmodes' + ps, vs)
         if cmats is not None:
-            np.save(self.save_dir+'/cplcoeffs/cplcoeffs'+ps,cmats)
+            self.xp.save(self.save_dir + '/cplcoeffs/cplcoeffs' + ps, cmats)
         if neffs is not None:
-            np.save(self.save_dir+'/eigenvalues/eigenvalues'+ps,neffs)
+            self.xp.save(self.save_dir + '/eigenvalues/eigenvalues' + ps, neffs)
         if zs is not None:
-            np.save(self.save_dir+'/zvals/zvals'+ps,zs)
-        if meshpoints is not None and len(meshpoints)>0:
-            np.save(self.save_dir+'/meshpoints/meshpoints'+ps,meshpoints)
+            self.xp.save(self.save_dir + '/zvals/zvals' + ps, zs)
+        if meshpoints is not None and len(meshpoints) > 0:
+            self.xp.save(self.save_dir + '/meshpoints/meshpoints' + ps, meshpoints)
 
-    def load(self,tag=""):
+    def load(self, tag=""):
         """ load the z values, effective indices, mode profiles, coupling coefficients, and mesh points
         saved to files specified by <tag>.
         """
-        ps = "" if tag == "" else "_"+tag
-        self.neffs = np.load(self.save_dir+'/eigenvalues/eigenvalues'+ps+'.npy')
-        self.vs = np.load(self.save_dir+'/eigenmodes/eigenmodes'+ps+".npy")
-        self.zs = np.load(self.save_dir+'/zvals/zvals'+ps+'.npy')
+        ps = "" if tag == "" else "_" + tag
+        self.neffs = self.xp.load(self.save_dir + '/eigenvalues/eigenvalues' + ps + '.npy')
+        self.vs = self.xp.load(self.save_dir + '/eigenmodes/eigenmodes' + ps + ".npy")
+        self.zs = self.xp.load(self.save_dir + '/zvals/zvals' + ps + '.npy')
         if self.Nmax is None:
             self.Nmax = len(self.neffs[0])
         self.channel_basis_matrix = None # clear old matrix
 
-        try:
-            self.cmats = np.load(self.save_dir+'/cplcoeffs/cplcoeffs'+ps+'.npy')
-            self.make_interp_funcs(self.zs,make_neff=False,make_v=False)
+        try:            
+            self.cmats = self.xp.load(self.save_dir + '/cplcoeffs/cplcoeffs' + ps + '.npy')
+            # In ~/dev/cbeam/src/cbeam/propagator.py -> Propagator.load()
+
+            if len(self.zs) > 1:
+                # Change this from False to True:
+                self.make_interp_funcs(self.zs,make_cmat=True, make_neff=False, make_v=False)
+            else:
+                self.make_interp_funcs_zinv()
+
+            # self.make_interp_funcs(self.zs, make_neff=False, make_v=False)
         except:
             print("no coupling matrix file found ... skipping")
             pass
 
         try: 
-            self.meshpoints = np.load(self.save_dir+'/meshpoints/meshpoints'+ps+".npy")
+            self.meshpoints = self.xp.load(self.save_dir + '/meshpoints/meshpoints' + ps + ".npy")
         except:
             print("no mesh points found ... skipping")
             pass
             
-        self.mesh = load_meshio_mesh(self.save_dir+'/meshes/mesh'+ps)
-        self.points0 = np.copy(self.mesh.points)
+        self.mesh = load_meshio_mesh(self.save_dir + '/meshes/mesh' + ps)
+        self.points0 = self.xp.copy(self.mesh.points)
 
-        if self.Nmax==None:
+        if self.Nmax == None:
             self.Nmax = self.neffs.shape[1]
         
-        if len(self.zs)>1:
-            self.make_interp_funcs(make_cmat=False)
+        if len(self.zs) > 1:
+            self.make_interp_funcs(self.zs, make_cmat=False)
         else:
             self.make_interp_funcs_zinv()
-        
-    
-    #endregion
 
-    #region aux funcs
-
-    def make_interp_funcs(self,zs=None,make_neff=True,make_cmat=True,make_v=True):
-        """ construct interpolation functions for coupling matrices and mode effective indices,
-            loaded into self.cmats and self.neffs, which were computed on an array of z values self.zs.
-        
-        ARGS:
-            zs (None or array): the z values to use for interpolation. if none, use self.zs
-            make_neff (bool): set True to make effective interpolation function
-            make_cmat (bool): set True to make coupling matrix interpolation function
-            make_v (bool): set True to make eigenmode interpolation function
-        """
-        
+    def make_interp_funcs(self, zs=None, make_neff=True, make_cmat=True, make_v=True):
         if zs is None:
-            zs = np.copy(self.zs)
-        
-        if make_cmat:
-            def make_c_func(i,j):
-                assert i < j, "i must be < j in make_interp_funcs()"
-                return UnivariateSpline(zs,0.5*(self.cmats[:,i,j]-self.cmats[:,j,i]),ext=0,s=0)
-            cmat_funcs = []
-            for j in range(1,self.Nmax):
-                for i in range(j):
-                    cmat_funcs.append(make_c_func(i,j))
-            
-            self.cmats_funcs = cmat_funcs
-        
-        if make_neff:
-            neff_funcs = []
-            for i in range(self.Nmax):
-                neff_funcs.append(UnivariateSpline(zs,self.neffs[:,i],s=0))
-            
-            self.neffs_funcs = neff_funcs
-            self.neffs_int_funcs = [neff_func.antiderivative() for neff_func in neff_funcs]
-            self.neffs_dif_funcs = [neff_func.derivative() for neff_func in neff_funcs]
+            zs = self.xp.copy(self.zs)
 
-        if make_v:
-            self.get_v = CubicSpline(zs,self.vs,axis=0)
+        if self.backend == "jax":
+            import jax.numpy as jnp
+
+            if make_cmat and self.cmats is not None:
+                # Build one spline per (i,j) pair in the exact loop order
+                cmat_funcs = []
+                for j in range(1, self.Nmax):
+                    for i in range(j):
+                        vals = 0.5 * (self.cmats[:, i, j] - self.cmats[:, j, i])
+                        cmat_funcs.append(_JAXCubicSpline(zs, vals))
+                self.cmats_funcs = cmat_funcs
+
+            if make_neff:
+                neff_funcs, neff_dif_funcs, neff_int_funcs = [], [], []
+                for i in range(self.Nmax):
+                    sp = _JAXCubicSpline(zs, self.neffs[:, i])
+                    neff_funcs.append(sp)
+                    neff_dif_funcs.append(sp.derivative())
+                    neff_int_funcs.append(sp.antiderivative())
+                self.neffs_funcs = neff_funcs
+                self.neffs_dif_funcs = neff_dif_funcs
+                self.neffs_int_funcs = neff_int_funcs
+
+            if make_v:
+                # _JAXCubicSpline with axis=0 over (n_z, n_modes, n_points)
+                self.get_v = _JAXCubicSpline(zs, self.vs, axis=0)
+
+        else:
+            # numpy path unchanged
+            from scipy.interpolate import UnivariateSpline, CubicSpline
+
+            if make_cmat and self.cmats is not None:
+                def make_c_func(i, j):
+                    return UnivariateSpline(zs, 0.5 * (self.cmats[:, i, j] - self.cmats[:, j, i]), ext=0, s=0)
+                cmat_funcs = []
+                for j in range(1, self.Nmax):
+                    for i in range(j):
+                        cmat_funcs.append(make_c_func(i, j))
+                self.cmats_funcs = cmat_funcs
+
+            if make_neff:
+                neff_funcs = [UnivariateSpline(zs, self.neffs[:, i], s=0) for i in range(self.Nmax)]
+                self.neffs_funcs = neff_funcs
+                self.neffs_int_funcs = [f.antiderivative() for f in neff_funcs]
+                self.neffs_dif_funcs = [f.derivative() for f in neff_funcs]
+
+            if make_v:
+                self.get_v = CubicSpline(zs, self.vs, axis=0)
+
 
     def make_interp_funcs_zinv(self):
-        #self.neffs_funcs = [lambda z: neff for neff in self.neffs[0]]
-        #self.neffs_int_funcs = [lambda z: z*neff for neff in self.neffs[0]]
-        #self.neffs_dif_funcs = [lambda z: 0 for neff in self.neffs[0]]
+        """ Create interpolation functions for z-invariant waveguides """
         self.get_v = lambda z: self.vs[0]
         self.get_neff = lambda z: self.neffs[0]
-        self.get_int_neff = lambda z: z*self.neffs[0]
-        self.get_dif_neff = lambda z: np.zeros_like(self.neffs[0])
-        self.get_cmat = lambda z: np.zeros((self.Nmax,self.Nmax))
+        self.get_int_neff = lambda z: z * self.neffs[0]
+        self.get_dif_neff = lambda z: self.xp.zeros_like(self.neffs[0])
+        self.get_cmat = lambda z: self.xp.zeros((self.Nmax, self.Nmax))
 
-    def get_cmat(self,z):
-        """ using interpolation, compute the cross-coupling matrix at z """
-        out = np.zeros((self.Nmax,self.Nmax))
-        k = 0
-        for j in range(1,self.Nmax):
-            for i in range(j):
-                val = self.cmats_funcs[k](z)
-                out[i,j] = -val
-                out[j,i] = val
-                k+=1
-        return out
+    def get_cmat(self, z):
+            # Assuming you have self.Nmax and self.cmats_funcs available
+            
+            # =====================================================================
+            # JAX BACKEND (Vectorized, Immutable-safe)
+            # =====================================================================
+            if self.backend == "jax":
+                import jax.numpy as jnp
+                
+                # Evaluate all spline functions at 'z' in a single step
+                vals = jnp.array([f(z) for f in self.cmats_funcs])
+                
+                # Construct the anti-symmetric matrix without mutating an array in a loop
+                out = jnp.zeros((self.Nmax, self.Nmax), dtype=vals.dtype)
+                
+                # Generate the upper triangular indices matching the initialization loop order
+                k = 0
+                for j in range(1, self.Nmax):
+                    for i in range(j):
+                        out = out.at[i, j].set(-vals[k])
+                        out = out.at[j, i].set(vals[k])
+                        k += 1
+                return out
+
+            # =====================================================================
+            # NUMPY BACKEND (Original Mutable Approach)
+            # =====================================================================
+            else:
+                out = self.xp.zeros((self.Nmax, self.Nmax))
+                k = 0
+                for j in range(1, self.Nmax):
+                    for i in range(j):
+                        val = self.cmats_funcs[k](z)
+                        out[i, j] = -val
+                        out[j, i] = val
+                        k += 1
+                return out
+            
     
-    def get_neff(self,z):
+    def get_neff(self, z):
         """ using interpolation, compute the array of mode effective indices at z """
-        return np.array([neff(z) for neff in self.neffs_funcs])
+        return self.xp.array([neff(z) for neff in self.neffs_funcs])
     
-    def get_int_neff(self,z):
+    def get_int_neff(self, z):
         """ compute the antiderivative of the mode effective indices at z"""
-        return np.array([neffi(z) for neffi in self.neffs_int_funcs])
+        return self.xp.array([neffi(z) for neffi in self.neffs_int_funcs])
 
-    def get_dif_neff(self,z):
-        return np.array([neffd (z) for neffd in self.neffs_dif_funcs]) 
+    def get_dif_neff(self, z):
+        return self.xp.array([neffd(z) for neffd in self.neffs_dif_funcs]) 
 
-    def WKB_cor(self,z):
+    def WKB_cor(self, z):
         dbeta_dz = self.k * self.get_dif_neff(z) 
         return -0.5 * dbeta_dz / (self.k * self.get_neff(z))
 
-    def compute_change_of_basis(self,newbasis,z=None,u=None):
+    def compute_change_of_basis(self, newbasis, z=None, u=None):
         """ compute the (N x N) change of basis matrix between the current N-dimensional eigenbasis at z and a new basis 
         
         ARGS: 
@@ -828,15 +895,15 @@ class Propagator:
             z = self.zs[-1]
 
         m = self.make_mesh_at_z(z)
-        B = construct_B(m,sparse=True)
+        B = construct_B(m, sparse=True)
         oldbasis = self.get_v(z)
-        cob = self.inner_product(newbasis,oldbasis,B)
+        cob = self.inner_product(newbasis, oldbasis, B)
         self.channel_basis_matrix = cob
         if u is not None:
-            return cob,np.dot(cob,u)
+            return cob, self.xp.dot(cob, u)
         return cob
     
-    def compute_isolated_basis(self,z=None):
+    def compute_isolated_basis(self, z=None):
         """ compute the eigenbasis corresponding to "isolated" channels of the waveguide.
         this only makes sense for waveguides such as PhotonicLantern, Dicoupler, and Tricoupler.
 
@@ -852,19 +919,18 @@ class Propagator:
         m = self.make_mesh_at_z(z)
         self.wvg.assign_IOR() 
         wvg_dim = len(self.wvg.prim3Dgroups[-1])
-        _v = np.zeros((wvg_dim,m.points.shape[0])) # array to store the new basis
+        _v = self.xp.zeros((wvg_dim, m.points.shape[0])) # array to store the new basis
 
         for i in range(wvg_dim):
             _dict = self.wvg.isolate(i) # use the PhotonicLantern.isolate() function to make a new dictionary of refractive index values which isolates a single core
-            #print(_dict)
-            _wi,_vi,_Ni = solve_waveguide(m,self.wl,_dict,sparse=True,Nmax=1) # then pass the new dictionary into the eigenmode solver
-            if np.sum(_vi) < 0: # attempt consistent sign
+            _wi, _vi, _Ni = solve_waveguide(m, self.wl, _dict, sparse=True, Nmax=1) # then pass the new dictionary into the eigenmode solver
+            if self.xp.sum(_vi) < 0: # attempt consistent sign
                 _vi *= -1
-            _v[i,:] = _vi # save the "port" eigenmode into _v
+            _v[i, :] = _vi # save the "port" eigenmode into _v
 
         return _v
 
-    def to_channel_basis(self,uf,z=None):   
+    def to_channel_basis(self, uf, z=None):   
         """ convert mode amplitude vector to basis of channel eigenmodes. 
         this only makes sense if the waveguide has defined output channels
         (i.e. the waveguide must have the isolate() function).
@@ -878,11 +944,11 @@ class Propagator:
         
         if self.channel_basis_matrix is None:  
             _v = self.compute_isolated_basis(z)
-            self.compute_change_of_basis(_v,z)
-        return np.dot(self.channel_basis_matrix,uf)
+            self.compute_change_of_basis(_v, z)
+        return self.xp.dot(self.channel_basis_matrix, uf)
 
 
-    def make_field(self,mode_amps,z=None,plot=False,apply_phase=True):
+    def make_field(self, mode_amps, z=None, plot=False, apply_phase=True):
         """ construct the finite element field corresponding to the modal vector u and the eigenbasis at z. 
         
         ARGS:
@@ -901,19 +967,19 @@ class Propagator:
         z = 0 if z is None and zinv else z
 
         zi = self.zs[0] if self.zs is not None else 0.
-        u = np.array(mode_amps,dtype=np.complex128)
+        u = self.xp.array(mode_amps, dtype=self.xp.complex128)
         basis = self.get_v(z)
         
         if apply_phase:
-            uf = self.apply_phase(u,z,zi)
-            field = np.sum(uf[:,None]*basis,axis=0)
+            uf = self.apply_phase(u, z, zi)
+            field = self.xp.sum(uf[:, None] * basis, axis=0)
         else:
-            field = np.sum(u[:,None]*basis,axis=0)
+            field = self.xp.sum(u[:, None] * basis, axis=0)
         if plot:
-            self.plot_cfield(field,z,show_mesh=True)
+            self.plot_cfield(field, z, show_mesh=True)
         return field
 
-    def make_mode_vector(self,field,z=None,mesh=None):
+    def make_mode_vector(self, field, z=None, mesh=None):
         """ from a field, make a complex mode amplitude vector by decomposing the 
         field into the currently loaded basis. kind of like the opposite of make_field(). 
 
@@ -927,38 +993,38 @@ class Propagator:
             else:
                 z = self.zs[0]
         mesh = self.make_mesh_at_z(z) if mesh is None else mesh
-        B = construct_B(self.mesh,sparse=True)
+        B = construct_B(self.mesh, sparse=True)
         basis = self.get_v(z)
         # take inner product between field and basis modes
         amps = []
         for i in range(basis.shape[0]):
-            amps.append(self.inner_product(basis[i],field,B))
+            amps.append(self.inner_product(basis[i], field, B))
         
-        return np.array(amps)
+        return self.xp.array(amps)
 
-    def decimate(self,arr,outsize=10,axis=1):
+    def decimate(self, arr, outsize=10, axis=1):
         #default is really avg down to 10 vals, not decimation
-        split_arrs = np.array_split(arr,outsize,axis=axis)
-        return np.array([np.mean(a,axis=axis) for a in split_arrs]).T
+        split_arrs = self.xp.array_split(arr, outsize, axis=axis)
+        return self.xp.array([self.xp.mean(a, axis=axis) for a in split_arrs]).T
 
-    def swap_modes(self,w,_w,_v):
+    def swap_modes(self, w, _w, _v):
         """ permute _w so that it matches w as close as possible.
         permute _v in the same way. """
         # it is mind-blowing that this function works lmao
         # it's so simple ... and confusing
         
-        sidxs = np.argsort(w)[::-1]
-        indices = np.argsort(sidxs)
-        return _v[indices] , _w[indices]
+        sidxs = self.xp.argsort(w)[::-1]
+        indices = self.xp.argsort(sidxs)
+        return _v[indices], _w[indices]
 
-    def track_modes(self,v,_v,w,_w):
+    def track_modes(self, v, _v, w, _w):
         if w is not None and self.allow_swaps:
-            _v[:] , _w[:] = self.swap_modes(w,_w,_v)        
+            _v[:], _w[:] = self.swap_modes(w, _w, _v)        
         for gr in self.degen_groups:
-            self.correct_degeneracy(gr,v,_v)
-        self.make_sign_consistent(v,_v)
+            self.correct_degeneracy(gr, v, _v)
+        self.make_sign_consistent(v, _v)
 
-    def correct_degeneracy(self,group,v,_v,q=None):
+    def correct_degeneracy(self, group, v, _v, q=None):
         """ used least-squares minimization to transform modes _v so that they match v. mutates _v
         
         ARGS:
@@ -975,18 +1041,18 @@ class Propagator:
                 - q: the change-of-basis matrix
         """
         if q is None:
-            coeff_mat = np.dot(v[group,:],_v[group,:].T)
-            u,s,vh = np.linalg.svd(coeff_mat)
-            q = np.dot(vh.T,u.T)
-        _vq = np.dot(_v[group,:].T,q)
-        _v[group,:] = _vq[:,:].T
-        return v,_v,q
+            coeff_mat = self.xp.dot(v[group, :], _v[group, :].T)
+            u, s, vh = self.xp.linalg.svd(coeff_mat)
+            q = self.xp.dot(vh.T, u.T)
+        _vq = self.xp.dot(_v[group, :].T, q)
+        _v[group, :] = _vq[:, :].T
+        return v, _v, q
 
-    def avg_degen_neff(self,group,neffs):
-        neffs[group] = np.mean(neffs[group])[None] 
+    def avg_degen_neff(self, group, neffs):
+        neffs[group] = self.xp.mean(neffs[group])[None] 
         return neffs
 
-    def compute_transfer_matrix(self,channel_basis=True,zi=None,zf=None):
+    def compute_transfer_matrix(self, channel_basis=True, zi=None, zf=None):
         """ compute the transfer matrix M corresponding to propagation through
         the waveguide. propagation of a mode vector v is equivalent to Mv.
 
@@ -999,28 +1065,28 @@ class Propagator:
             (array): an Nmax x Nmax complex-valued transfer matrix.
         """
         N = self.Nmax
-        mat = np.zeros((N,N),dtype=np.complex128)
-        u0 = np.zeros(N)
+        mat = self.xp.zeros((N, N), dtype=self.xp.complex128)
+        u0 = self.xp.zeros(N)
         for j in range(N):
-            print("\rpropagating mode {0}".format(j),end='',flush=True)
+            print("\rpropagating mode {0}".format(j), end='', flush=True)
             if j in self.skipped_modes:
                 continue
             u0[:] = 0.
             u0[j] = 1.
-            zs,us,uf = self.propagate(u0,zi,zf)
+            zs, us, uf = self.propagate(u0, zi, zf)
             if channel_basis:
                 out = self.to_channel_basis(uf)
             else:
                 out = uf
             M = len(out)
-            mat[:M,j] = out
+            mat[:M, j] = out
         return mat
 
     #endregion
         
     #region mesh gen
 
-    def generate_mesh(self,writeto=None):
+    def generate_mesh(self, writeto=None):
         """ generate a mesh for the loaded waveguide according to class attributes.
         
         ARGS:
@@ -1028,7 +1094,7 @@ class Propagator:
         """
         return self.wvg.make_mesh(writeto=writeto)
 
-    def make_mesh_at_z(self,z):
+    def make_mesh_at_z(self, z):
         """ make the mesh corresponding to the waveguide cross-section at z. 
         
         ARGS:
@@ -1040,13 +1106,13 @@ class Propagator:
         mesh = self.generate_mesh() if self.mesh is None else self.mesh
         if z == 0:
             return copy.deepcopy(mesh)
-        return self.wvg.transform_mesh(mesh,0,z)
+        return self.wvg.transform_mesh(mesh, 0, z)
 
     #endregion
 
     #region plotting
 
-    def plot_wavefront(self,zs,us,zi=0,fig=None,ax=None):
+    def plot_wavefront(self, zs, us, zi=0, fig=None, ax=None):
         """ plot the complex-valued wavefront through the waveguide. there
         may be some graphical glitches. mesh lines will be visible (issue with 
         matplotlib's tripcolor).
@@ -1062,41 +1128,41 @@ class Propagator:
             (matplotlib.widgets.slider): the slider object. a reference to the slider needs to be kept to prevent garbage collection from removing it.
         """
         
-        plot=False
+        plot = False
         if ax is None or fig is None:
-            fig,ax = plt.subplots(1,1)
+            fig, ax = plt.subplots(1, 1)
             fig.subplots_adjust(bottom=0.25)
-            plot=True
+            plot = True
 
         mesh = copy.deepcopy(self.mesh)
         ax.set_facecolor('black')
         ax.set_aspect('equal')
-        x0,y0,w,h = ax.get_position().bounds
+        x0, y0, w, h = ax.get_position().bounds
         ax.set_xlabel(r"$x$")
         ax.set_ylabel(r"$y$")
         def update(z):
             ax.clear()
-            ix = bisect_left(zs,z)
-            f = self.make_field(us[ix],z)
-            self.wvg.transform_mesh(self.mesh,0,z,mesh)
-            x = mesh.points[:,0]
-            y = mesh.points[:,1]
-            triangulation = Triangulation(x,y,self.mesh.cells[1].data[:,:3])
-            alphas = np.abs(f)
-            alphas /= np.max(alphas)
-            im = ax.tripcolor(triangulation,np.angle(f),cmap='hsv',vmin=-np.pi,vmax=np.pi,shading="gouraud",alpha=alphas)
+            ix = bisect_left(zs, z)
+            f = self.make_field(us[ix], z)
+            self.wvg.transform_mesh(self.mesh, 0, z, mesh)
+            x = mesh.points[:, 0]
+            y = mesh.points[:, 1]
+            triangulation = Triangulation(x, y, self.mesh.cells[1].data[:, :3])
+            alphas = self.xp.abs(f)
+            alphas /= self.xp.max(alphas)
+            im = ax.tripcolor(triangulation, self.xp.angle(f), cmap='hsv', vmin=-self.xp.pi, vmax=self.xp.pi, shading="gouraud", alpha=alphas)
             fig.canvas.draw_idle()
             return im,
         slider = None
         im, = update(0)     
         if len(zs) > 1:
-            axsl = fig.add_axes([x0,y0-0.25,w,0.1])
-            slider = Slider(ax=axsl,label=r'$z$',valmin=zs[0],valmax=zs[-1],valinit=zs[0])
+            axsl = fig.add_axes([x0, y0 - 0.25, w, 0.1])
+            slider = Slider(ax=axsl, label=r'$z$', valmin=zs[0], valmax=zs[-1], valinit=zs[0])
             slider.on_changed(update)
             if zi != 0:
                 slider.set_val(zi)   
         if fig is not None:
-            fig.colorbar(im,cmap='hsv',ax=ax,ticks=np.linspace(-np.pi,np.pi,5,endpoint=True),label="phase")
+            fig.colorbar(im, cmap='hsv', ax=ax, ticks=self.xp.linspace(-self.xp.pi, self.xp.pi, 5, endpoint=True), label="phase")
         if plot:
             plt.show()
         return slider
@@ -1105,16 +1171,16 @@ class Propagator:
         """ plot the effective indices of the eigenmodes """
         neffs = self.neffs.T
         for i in range(self.Nmax):
-            plt.plot(self.zs,neffs[i],label="mode "+str(i),)
+            plt.plot(self.zs, neffs[i], label="mode " + str(i),)
         for z in self.zs: # plot vertical bars at every z value.
-            plt.axvline(x=z,alpha=0.05,color='k',zorder=-100)
+            plt.axvline(x=z, alpha=0.05, color='k', zorder=-100)
         plt.xlabel(r"$z$")
         plt.ylabel("effective index")
-        plt.legend(loc='best',bbox_to_anchor=(1.04, 1.))
+        plt.legend(loc='best', bbox_to_anchor=(1.04, 1.))
         plt.tight_layout()
         plt.show()
     
-    def plot_neff_diffs(self,yscale="log"):
+    def plot_neff_diffs(self, yscale="log"):
         """ plot the difference between the effective index of each mode and that of the fundamental.
 
         ARGS:
@@ -1122,22 +1188,22 @@ class Propagator:
             y axis.
 
         """
-        assert yscale in ["log","lin"], "yscale not recognized"
+        assert yscale in ["log", "lin"], "yscale not recognized"
         neffs = self.neffs.T
-        for i in range(1,self.Nmax):
+        for i in range(1, self.Nmax):
             if yscale == "log":
-                plt.semilogy(self.zs,neffs[0]-neffs[i],label="mode "+str(i))
+                plt.semilogy(self.zs, neffs[0] - neffs[i], label="mode " + str(i))
             else:
-                plt.plot(self.zs,neffs[0]-neffs[i],label="mode "+str(i))
+                plt.plot(self.zs, neffs[0] - neffs[i], label="mode " + str(i))
         for z in self.zs: # plot vertical bars at every z value.
-            plt.axvline(x=z,alpha=0.05,color='k',zorder=-100)
+            plt.axvline(x=z, alpha=0.05, color='k', zorder=-100)
         plt.xlabel(r"$z$")
         plt.ylabel("difference in index from mode 0")
-        plt.legend(loc='best',bbox_to_anchor=(1.04, 1.))
+        plt.legend(loc='best', bbox_to_anchor=(1.04, 1.))
         plt.tight_layout()
         plt.show()   
 
-    def plot_field(self,field,z=None,mesh=None,ax=None,show_mesh=False):
+    def plot_field(self, field, z=None, mesh=None, ax=None, show_mesh=False):
         """ plot a real-valued finite element field, evaluated on the points of the mesh corresponding to the waveguide cross-section at z.
         
         ARGS:
@@ -1148,24 +1214,24 @@ class Propagator:
             show_mesh (opt.): whether or not to draw the mesh in the plot
         """
         mesh = self.make_mesh_at_z(z) if mesh is None else mesh
-        plot_field(field,mesh,ax,show_mesh)
+        plot_field(field, mesh, ax, show_mesh)
 
-    def plot_coupling_coeffs(self,legend=True):
+    def plot_coupling_coeffs(self, legend=True):
         """ plot coupling coefficient matrix vs z values. """
 
-        fig,ax = plt.subplots()
+        fig, ax = plt.subplots()
 
         colors = ['#377eb8', '#ff7f00', '#4daf4a',
                         '#f781bf', '#a65628', '#984ea3',
                         '#999999', '#e41a1c', '#dede00']
-        line_styles = ['solid','dashed','dotted','dashdot',(5,(10,3))]
+        line_styles = ['solid', 'dashed', 'dotted', 'dashdot', (5, (10, 3))]
 
         for j in range(self.Nmax): 
             for i in range(j):
-                ax.plot(self.zs,self.cmats[:,i,j],label=str(i)+str(j),ls=line_styles[i%5],c=colors[j%9])
+                ax.plot(self.zs, self.cmats[:, i, j], label=str(i)+str(j), ls=line_styles[i%5], c=colors[j%9])
 
         for z in self.zs: # plot vertical bars at every z value.
-            ax.axvline(x=z,alpha=0.05,color='k',zorder=-100)
+            ax.axvline(x=z, alpha=0.05, color='k', zorder=-100)
         if legend:
             ax.legend(bbox_to_anchor=(1.04, 1.))
         ax.set_title("coupling coefficient matrix")
@@ -1174,7 +1240,7 @@ class Propagator:
         plt.tight_layout()
         plt.show()
 
-    def plot_mode_powers(self,zs,us):
+    def plot_mode_powers(self, zs, us):
         """ plot mode powers against :math:`z`.
 
         ARGS:
@@ -1182,14 +1248,14 @@ class Propagator:
             us: array of mode amplitudes, e.g. from propagate(). the first axis corresponds to z.
         """
         for i in range(us.shape[1]):
-            plt.plot(zs,np.power(np.abs(us[:,i]),2),label="mode "+str(i))     
+            plt.plot(zs, self.xp.power(self.xp.abs(us[:, i]), 2), label="mode " + str(i))     
         plt.xlabel(r'$z$ (um)')
         plt.ylabel("power")
-        plt.legend(loc='best',bbox_to_anchor=(1.04, 1))
+        plt.legend(loc='best', bbox_to_anchor=(1.04, 1))
         plt.tight_layout()   
         plt.show()   
             
-    def plot_cfield(self,field,z=None,mesh=None,fig=None,ax=None,show_mesh=False,res=1.,xlim=None,ylim=None):
+    def plot_cfield(self, field, z=None, mesh=None, fig=None, ax=None, show_mesh=False, res=1., xlim=None, ylim=None):
         """ plot a complex-valued field evaluated a finite element mesh. this function is a little
         slow because it resamples <field> onto a grid.
         
@@ -1204,15 +1270,15 @@ class Propagator:
             xlim (tuple): (xmin,xmax) values for the plot - useful if you want to zoom in on the field
             ylim (tuple): (ymin,ymax) values for the plot.
         """
-        zinv = (self.zs is not None and len(self.zs)==1) or (self.wvg is not None and self.wvg.z_invariant)
+        zinv = (self.zs is not None and len(self.zs) == 1) or (self.wvg is not None and self.wvg.z_invariant)
         assert z is not None or mesh is not None or zinv, "one of `z` or `mesh` needs to be passed for plotting"
         if zinv:
             mesh = self.make_mesh_at_z(0) if mesh is None else mesh
         else:
             mesh = self.make_mesh_at_z(z) if mesh is None else mesh
-        plot_cfield(field,mesh,fig,ax,show_mesh,res,xlim,ylim)
+        plot_cfield(field, mesh, fig, ax, show_mesh, res, xlim, ylim)
 
-    def plot_waveguide_mode(self,i,zi=0,fig=None,ax=None):
+    def plot_waveguide_mode(self, i, zi=0, fig=None, ax=None):
         """ plot a real-valued eigenmode of the waveguide, from modes saved in self.vs.
         this plot comes with a slider which controls the z value.
         
@@ -1225,31 +1291,31 @@ class Propagator:
         RETURNS:
             (matplotlib.widgets.slider): the slider object. a reference to the slider needs to be kept to prevent garbage collection from removing it.
         """
-        plot=False
+        plot = False
         if ax is None or fig is None:
-            fig,ax = plt.subplots(1,1)
+            fig, ax = plt.subplots(1, 1)
             fig.subplots_adjust(bottom=0.25)
-            plot=True
+            plot = True
 
         mesh = copy.deepcopy(self.mesh)
         ax.set_aspect('equal')
-        x0,y0,w,h = ax.get_position().bounds
+        x0, y0, w, h = ax.get_position().bounds
         ax.set_xlabel(r"$x$")
         ax.set_ylabel(r"$y$")
         def update(z):
             ax.clear()
             v = self.get_v(z)[i]
-            self.wvg.transform_mesh(self.mesh,0,z,mesh)
-            x = mesh.points[:,0]
-            y = mesh.points[:,1]
-            triangulation = Triangulation(x,y,self.mesh.cells[1].data[:,:3])
-            ax.tripcolor(triangulation,v,shading='gouraud')
+            self.wvg.transform_mesh(self.mesh, 0, z, mesh)
+            x = mesh.points[:, 0]
+            y = mesh.points[:, 1]
+            triangulation = Triangulation(x, y, self.mesh.cells[1].data[:, :3])
+            ax.tripcolor(triangulation, v, shading='gouraud')
             fig.canvas.draw_idle()
         slider = None
         update(0)
         if len(self.zs) > 1:
-            axsl = fig.add_axes([x0,y0-0.25,w,0.1])
-            slider = Slider(ax=axsl,label=r'$z$',valmin=self.zs[0],valmax=self.zs[-1],valinit=self.zs[0])
+            axsl = fig.add_axes([x0, y0 - 0.25, w, 0.1])
+            slider = Slider(ax=axsl, label=r'$z$', valmin=self.zs[0], valmax=self.zs[-1], valinit=self.zs[0])
             slider.on_changed(update)        
             if zi != 0:
                 slider.set_val(zi)
@@ -1261,7 +1327,7 @@ class Propagator:
 class ChainPropagator(Propagator):
     """ a ChainPropagator is a series of Propagators connected `end-to-end`. """
 
-    def __init__(self,propagators:list[Propagator]):
+    def __init__(self, propagators: list):
         self.propagators = propagators
         self.z_breaks = [propagators[0].zs[0]]
         for p in propagators:
@@ -1273,22 +1339,31 @@ class ChainPropagator(Propagator):
         self.Nmax = p0.Nmax
         self.skipped_modes = p0.skipped_modes
         self.mesh = p0.mesh
-        self.zs = np.concatenate([p.zs for p in propagators])
+        self.xp = get_xp()
+        self.backend = get_backend()
+        self.zs = self.xp.concatenate([p.zs for p in propagators])
 
-    def get_v(self,z):
+    def get_v(self, z):
         return self.get_prop(z).get_v(z)
 
-    def get_prop(self,z):
-        idx = max(0,bisect_left(self.z_breaks,z)-1)
-        return self.propagators[idx]  
+    def get_prop(self, z):
+        # 1. Compute the split position index
+        idx = max(0, bisect_left(self.z_breaks, z) - 1)
+        
+        # 2. Safety Valve: Pin it so it can never overflow the actual list size
+        max_valid_idx = len(self.propagators) - 1
+        idx = min(idx, max_valid_idx)
+        
+        return self.propagators[idx]
+    
 
-    def propagate(self,u0,zi=None,zf=None):
+    def propagate(self, u0, zi=None, zf=None):
         if zi is None:
             zi = self.propagators[0].zs[0]
         if zf is None:
             zf = self.propagators[-1].zs[-1]
         
-        u = np.array(u0)
+        u = self.xp.array(u0)
 
         all_zs = None
         all_us = None
@@ -1296,21 +1371,21 @@ class ChainPropagator(Propagator):
         z = zi
 
         while z != zf:
-            p = self.get_prop(z+1e-6) # a little cheap lol
+            p = self.get_prop(z + 1e-6) # a little cheap lol
             if zf >= p.zs[-1]:
-                zs,us,u = p.propagate(u,z,None)
+                zs, us, u = p.propagate(u, z, None)
             else:
-                zs,us,u = p.propagate(u,z,zf)
+                zs, us, u = p.propagate(u, z, zf)
             z = zs[-1]
             
             if all_zs is None:
                 all_zs = zs
                 all_us = us
             else:
-                all_zs = np.concatenate((all_zs,zs))
-                all_us = np.concatenate((all_us,us))
+                all_zs = self.xp.concatenate((all_zs, zs))
+                all_us = self.xp.concatenate((all_us, us))
         
-        return all_zs,all_us,u
+        return all_zs, all_us, u
 
     def to_channel_basis(self, uf, z=None):
         if z is None:
@@ -1319,4 +1394,3 @@ class ChainPropagator(Propagator):
 
     def make_field(self, mode_amps, z, plot=False, apply_phase=True):
         return self.get_prop(z).make_field(mode_amps, z, plot, apply_phase)
-    
