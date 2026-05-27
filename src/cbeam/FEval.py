@@ -1,7 +1,14 @@
 from juliacall import Main as jl
 import numpy as np
 import os,cbeam
-from juliacall import Pkg as jlPkg
+
+import juliacall
+
+# Load Pkg inside Julia and expose it safely to Python
+juliacall.Main.seval("using Pkg")
+jlPkg = juliacall.Main.Pkg
+
+# from juliacall import Pkg as jlPkg
 
 jlPkg.activate(os.path.dirname(cbeam.__file__)+"/FEval")
 jl.seval("using FEval")
