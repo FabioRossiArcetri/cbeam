@@ -82,43 +82,45 @@ class _JAXCubicSpline:
         self.axis = 0  # always 0 after moveaxis
         self._coeffs = self._fit(xs, ys)  # (a, b, c, d) each (n-1, *trailing)
 
+
     @staticmethod
     def _fit(xs, ys):
         n = xs.shape[0]
         h = xp.diff(xs)                          # (n-1,)
         dy = xp.diff(ys, axis=0)                 # (n-1, ...)
 
-        # Build tridiagonal system for interior second derivatives (natural BC)
         shape_tail = ys.shape[1:]
-        m = xp.zeros((n,) + shape_tail, dtype=xp.float64)
-
-        # Thomas algorithm — unavoidable sequential dependency; use numpy for setup
+        
         import numpy as np
         h_np = np.array(h)
         dy_np = np.array(dy)
-        n_pts = n
-        m_np = np.zeros((n_pts,) + shape_tail)
+        
+        # Array to store second derivatives
+        m_np = np.zeros((n,) + shape_tail)
 
-        # Forward sweep
-        c_prime = np.zeros(n_pts - 1)
-        d_prime = np.zeros((n_pts,) + shape_tail)
-
-        c_prime[0] = h_np[1] / (2 * (h_np[0] + h_np[1]))
-        rhs = 3 * (dy_np[1] / h_np[1] - dy_np[0] / h_np[0])
-        d_prime[1] = rhs / (2 * (h_np[0] + h_np[1]))
-
-        for i in range(1, n_pts - 2):
-            denom = 2 * (h_np[i - 1] + h_np[i]) - h_np[i - 1] * c_prime[i - 1]
-            c_prime[i] = h_np[i] / denom
-            rhs = 3 * (dy_np[i + 1] / h_np[i] - dy_np[i] / h_np[i - 1])
-            d_prime[i + 1] = (rhs - h_np[i - 1] * d_prime[i]) / denom
-
-        # Back substitution
-        m_np[-1] = 0.
-        for i in range(n_pts - 2, 0, -1):
-            m_np[i] = d_prime[i + 1] - c_prime[i] * m_np[i + 1]
-        m_np[0] = 0.
-
+        if n > 2:
+            # Thomas algorithm arrays for interior points 1 to n-2
+            c_prime = np.zeros(n)
+            d_prime = np.zeros((n,) + shape_tail)
+            
+            # Initialize for the first interior point (i = 1)
+            denom = 2.0 * (h_np[0] + h_np[1])
+            c_prime[1] = h_np[1] / denom
+            rhs = 3.0 * (dy_np[1] / h_np[1] - dy_np[0] / h_np[0])
+            d_prime[1] = rhs / denom
+            
+            # Forward sweep for remaining interior points (i = 2 to n-2)
+            for i in range(2, n - 1):
+                denom = 2.0 * (h_np[i - 1] + h_np[i]) - h_np[i - 1] * c_prime[i - 1]
+                c_prime[i] = h_np[i] / denom
+                rhs = 3.0 * (dy_np[i] / h_np[i] - dy_np[i - 1] / h_np[i - 1])
+                d_prime[i] = (rhs - h_np[i - 1] * d_prime[i - 1]) / denom
+                
+            # Back substitution (m_np[0] and m_np[n-1] remain 0 for natural BC)
+            m_np[n - 2] = d_prime[n - 2]
+            for i in range(n - 3, 0, -1):
+                m_np[i] = d_prime[i] - c_prime[i] * m_np[i + 1]
+                
         m = xp.array(m_np)
 
         # Polynomial coefficients on each interval
@@ -127,7 +129,7 @@ class _JAXCubicSpline:
         c = m[:-1]
         d = (m[1:] - m[:-1]) / (3 * h[:, *([None] * len(shape_tail))])
         return a, b, c, d
-
+    
     def _eval(self, z, coeffs):
         a, b, c, d = coeffs
         xs = self.xs
