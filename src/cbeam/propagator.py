@@ -789,8 +789,9 @@ class Propagator:
         if meshpoints is not None and len(meshpoints) > 0:
             self.xp.save(self.save_dir + '/meshpoints/meshpoints' + ps, meshpoints)
 
+
     def load(self, tag=""):
-        """ load the z values, effective indices, mode profiles, coupling coefficients, and mesh points
+        """Load the z values, effective indices, mode profiles, coupling coefficients, and mesh points
         saved to files specified by <tag>.
         """
         ps = "" if tag == "" else "_" + tag
@@ -800,22 +801,20 @@ class Propagator:
         if self.Nmax is None:
             self.Nmax = len(self.neffs[0])
         self.channel_basis_matrix = None # clear old matrix
-
+    
         try:            
             self.cmats = self.xp.load(self.save_dir + '/cplcoeffs/cplcoeffs' + ps + '.npy')
-            # In ~/dev/cbeam/src/cbeam/propagator.py -> Propagator.load()
-
+    
             if len(self.zs) > 1:
-                # Change this from False to True:
-                self.make_interp_funcs(self.zs,make_cmat=True, make_neff=False, make_v=False)
+                # JAX backend will create splines; numpy backend will create function lists
+                self.make_interp_funcs(self.zs, make_cmat=True, make_neff=False, make_v=False)
             else:
                 self.make_interp_funcs_zinv()
-
-            # self.make_interp_funcs(self.zs, make_neff=False, make_v=False)
+    
         except:
             print("no coupling matrix file found ... skipping")
             pass
-
+    
         try: 
             self.meshpoints = self.xp.load(self.save_dir + '/meshpoints/meshpoints' + ps + ".npy")
         except:
@@ -824,7 +823,7 @@ class Propagator:
             
         self.mesh = load_meshio_mesh(self.save_dir + '/meshes/mesh' + ps)
         self.points0 = self.xp.copy(self.mesh.points)
-
+    
         if self.Nmax == None:
             self.Nmax = self.neffs.shape[1]
         
@@ -833,118 +832,225 @@ class Propagator:
         else:
             self.make_interp_funcs_zinv()
 
+
     def make_interp_funcs(self, zs=None, make_neff=True, make_cmat=True, make_v=True):
+        """Construct interpolation functions for coupling matrices and mode effective indices,
+        loaded into self.cmats and self.neffs, which were computed on an array of z values self.zs.
+        
+        ARGS:
+            zs (None or array): the z values to use for interpolation. if none, use self.zs
+            make_neff (bool): set True to make effective interpolation function
+            make_cmat (bool): set True to make coupling matrix interpolation function
+            make_v (bool): set True to make eigenmode interpolation function
+        """
         if zs is None:
             zs = self.xp.copy(self.zs)
-
+    
+        # =====================================================================
+        # JAX BACKEND (GPU Accelerated)
+        # =====================================================================
         if self.backend == "jax":
+            import jax
             import jax.numpy as jnp
-
-            if make_cmat and self.cmats is not None:
-                # Build one spline per (i,j) pair in the exact loop order
-                cmat_funcs = []
+            import diffrax
+    
+            zs_jnp = jnp.asarray(zs)
+    
+            if make_cmat:
+                # Extract the upper-triangle elements in the exact loop order to match original indexing
+                c_elements = []
                 for j in range(1, self.Nmax):
                     for i in range(j):
-                        vals = 0.5 * (self.cmats[:, i, j] - self.cmats[:, j, i])
-                        cmat_funcs.append(_JAXCubicSpline(zs, vals))
-                self.cmats_funcs = cmat_funcs
-
+                        val = 0.5 * (self.cmats[:, i, j] - self.cmats[:, j, i])
+                        c_elements.append(val)
+                
+                # Pack into a 2D array shape: (num_z_points, num_combinations)
+                c_matrix_data = jnp.stack(c_elements, axis=1)
+                
+                c_coeffs = diffrax.backward_hermite_coefficients(zs_jnp, c_matrix_data)
+                spline_c = diffrax.CubicInterpolation(zs_jnp, c_coeffs)
+    
+                # FIXED: Store spline directly instead of list of functions
+                self.cmats_spline = spline_c
+                self.cmats_funcs = None  # Deprecated for JAX backend
+    
             if make_neff:
-                neff_funcs, neff_dif_funcs, neff_int_funcs = [], [], []
+                neff_jnp = jnp.asarray(self.neffs[:, :self.Nmax])
+                neff_coeffs = diffrax.backward_hermite_coefficients(zs_jnp, neff_jnp)
+                spline_neff = diffrax.CubicInterpolation(zs_jnp, neff_coeffs)
+    
+                # FIXED: Store spline directly instead of list of functions
+                self.neffs_spline = spline_neff
+                self.neffs_funcs = None  # Deprecated for JAX backend
+                
+                # Pre-compute integrals for each mode using trapezoidal rule
+                y_data = neff_jnp
+                
+                # Compute cumulative integrals for all modes at once
+                # Shape of y_data: (num_z, Nmax)
+                # We want: trapz_integral[i] = integral from zs[0] to zs[i] of y_data[:,j] dz
+                dz = jnp.diff(zs_jnp)
+                trapz_values = 0.5 * (y_data[1:] + y_data[:-1])  # Shape: (num_z-1, Nmax)
+                cumsum_vals = jnp.concatenate([
+                    jnp.zeros((1, self.Nmax)), 
+                    jnp.cumsum(trapz_values * dz[:, None], axis=0)
+                ], axis=0)  # Shape: (num_z, Nmax)
+                
+                neffs_int_funcs = []
                 for i in range(self.Nmax):
-                    sp = _JAXCubicSpline(zs, self.neffs[:, i])
-                    neff_funcs.append(sp)
-                    neff_dif_funcs.append(sp.derivative())
-                    neff_int_funcs.append(sp.antiderivative())
-                self.neffs_funcs = neff_funcs
-                self.neffs_dif_funcs = neff_dif_funcs
-                self.neffs_int_funcs = neff_int_funcs
-
+                    # Use closure to capture the integral curve for mode i
+                    f_int = lambda z, nodes=cumsum_vals[:, i], z_nodes=zs_jnp: jnp.interp(z, z_nodes, nodes)
+                    neffs_int_funcs.append(f_int)
+                
+                self.neffs_int_funcs = neffs_int_funcs
+                
+                # For derivatives, we'll compute them on-the-fly in get_dif_neff using jax.jacfwd
+                # No need to store individual derivative functions
+    
             if make_v:
-                # _JAXCubicSpline with axis=0 over (n_z, n_modes, n_points)
-                self.get_v = _JAXCubicSpline(zs, self.vs, axis=0)
-
+                vs_jnp = jnp.asarray(self.vs)
+                v_coeffs = diffrax.backward_hermite_coefficients(zs_jnp, vs_jnp)
+                spline_v = diffrax.CubicInterpolation(zs_jnp, v_coeffs)
+                
+                # Store spline directly
+                self.get_v = lambda z: spline_v.evaluate(z)
+    
+        # =====================================================================
+        # NUMPY BACKEND (CPU Fallback) - KEEP ORIGINAL
+        # =====================================================================
         else:
-            # numpy path unchanged
+            import numpy as np
             from scipy.interpolate import UnivariateSpline, CubicSpline
-
-            if make_cmat and self.cmats is not None:
+    
+            if make_cmat:
                 def make_c_func(i, j):
+                    assert i < j, "i must be < j in make_interp_funcs()"
                     return UnivariateSpline(zs, 0.5 * (self.cmats[:, i, j] - self.cmats[:, j, i]), ext=0, s=0)
+                
                 cmat_funcs = []
                 for j in range(1, self.Nmax):
                     for i in range(j):
                         cmat_funcs.append(make_c_func(i, j))
+                
                 self.cmats_funcs = cmat_funcs
-
+                self.cmats_spline = None  # Not used in numpy backend
+    
             if make_neff:
-                neff_funcs = [UnivariateSpline(zs, self.neffs[:, i], s=0) for i in range(self.Nmax)]
+                neff_funcs = []
+                for i in range(self.Nmax):
+                    neff_funcs.append(UnivariateSpline(zs, self.neffs[:, i], s=0))
+                
                 self.neffs_funcs = neff_funcs
-                self.neffs_int_funcs = [f.antiderivative() for f in neff_funcs]
-                self.neffs_dif_funcs = [f.derivative() for f in neff_funcs]
-
+                self.neffs_spline = None  # Not used in numpy backend
+                self.neffs_int_funcs = [neff_func.antiderivative() for neff_func in neff_funcs]
+                self.neffs_dif_funcs = [neff_func.derivative() for neff_func in neff_funcs]
+    
             if make_v:
                 self.get_v = CubicSpline(zs, self.vs, axis=0)
-
-
+    
     def make_interp_funcs_zinv(self):
-        """ Create interpolation functions for z-invariant waveguides """
-        self.get_v = lambda z: self.vs[0]
-        self.get_neff = lambda z: self.neffs[0]
-        self.get_int_neff = lambda z: z * self.neffs[0]
-        self.get_dif_neff = lambda z: self.xp.zeros_like(self.neffs[0])
-        self.get_cmat = lambda z: self.xp.zeros((self.Nmax, self.Nmax))
+        """Create interpolation functions for z-invariant waveguides"""
+        
+        # Store the static values
+        _v_zinv = self.vs[0]
+        _neff_zinv = self.neffs[0]
+        _neff_dif_zinv = self.xp.zeros_like(self.neffs[0])
+        _cmat_zinv = self.xp.zeros((self.Nmax, self.Nmax))
+        
+        # Create wrapper functions that JAX can handle
+        def get_v_zinv(z):
+            return _v_zinv
+        
+        def get_neff_zinv(z):
+            return _neff_zinv
+        
+        def get_int_neff_zinv(z):
+            return z * _neff_zinv
+        
+        def get_dif_neff_zinv(z):
+            return _neff_dif_zinv
+        
+        def get_cmat_zinv(z):
+            return _cmat_zinv
+        
+        # Assign the functions
+        self.get_v = get_v_zinv
+        self.get_neff = get_neff_zinv
+        self.get_int_neff = get_int_neff_zinv
+        self.get_dif_neff = get_dif_neff_zinv
+        self.get_cmat = get_cmat_zinv
+
 
     def get_cmat(self, z):
-            # Assuming you have self.Nmax and self.cmats_funcs available
+        """Evaluate coupling matrix at position z"""
+        # =====================================================================
+        # JAX BACKEND (Vectorized, Immutable-safe)
+        # =====================================================================
+        if self.backend == "jax":
+            import jax.numpy as jnp
             
-            # =====================================================================
-            # JAX BACKEND (Vectorized, Immutable-safe)
-            # =====================================================================
-            if self.backend == "jax":
-                import jax.numpy as jnp
-                
-                # Evaluate all spline functions at 'z' in a single step
-                vals = jnp.array([f(z) for f in self.cmats_funcs])
-                
-                # Construct the anti-symmetric matrix without mutating an array in a loop
-                out = jnp.zeros((self.Nmax, self.Nmax), dtype=vals.dtype)
-                
-                # Generate the upper triangular indices matching the initialization loop order
-                k = 0
-                for j in range(1, self.Nmax):
-                    for i in range(j):
-                        out = out.at[i, j].set(-vals[k])
-                        out = out.at[j, i].set(vals[k])
-                        k += 1
-                return out
+            # FIXED: Evaluate spline directly instead of list comprehension
+            vals = self.cmats_spline.evaluate(z)  # Shape: (num_elements,)
+            
+            # Construct the anti-symmetric matrix
+            out = jnp.zeros((self.Nmax, self.Nmax), dtype=vals.dtype)
+            
+            # Generate the upper triangular indices matching the initialization loop order
+            k = 0
+            for j in range(1, self.Nmax):
+                for i in range(j):
+                    out = out.at[i, j].set(-vals[k])
+                    out = out.at[j, i].set(vals[k])
+                    k += 1
+            return out
+    
+        # =====================================================================
+        # NUMPY BACKEND (Original Mutable Approach)
+        # =====================================================================
+        else:
+            out = self.xp.zeros((self.Nmax, self.Nmax))
+            k = 0
+            for j in range(1, self.Nmax):
+                for i in range(j):
+                    val = self.cmats_funcs[k](z)
+                    out[i, j] = -val
+                    out[j, i] = val
+                    k += 1
+            return out
 
-            # =====================================================================
-            # NUMPY BACKEND (Original Mutable Approach)
-            # =====================================================================
-            else:
-                out = self.xp.zeros((self.Nmax, self.Nmax))
-                k = 0
-                for j in range(1, self.Nmax):
-                    for i in range(j):
-                        val = self.cmats_funcs[k](z)
-                        out[i, j] = -val
-                        out[j, i] = val
-                        k += 1
-                return out
-            
     
     def get_neff(self, z):
-        """ using interpolation, compute the array of mode effective indices at z """
-        return self.xp.array([neff(z) for neff in self.neffs_funcs])
-    
+        """Using interpolation, compute the array of mode effective indices at z"""
+        if self.backend == "jax":
+            # FIXED: Call spline directly instead of list comprehension
+            return self.neffs_spline.evaluate(z)
+        else:
+            return self.xp.array([neff(z) for neff in self.neffs_funcs])
+        
     def get_int_neff(self, z):
-        """ compute the antiderivative of the mode effective indices at z"""
-        return self.xp.array([neffi(z) for neffi in self.neffs_int_funcs])
-
+        """Compute the antiderivative of the mode effective indices at z"""
+        if self.backend == "jax":
+            # FIXED: Call stored integral functions with both z and z_nodes
+            return self.xp.array([neffi(z) for neffi in self.neffs_int_funcs])
+        else:
+            return self.xp.array([neffi(z) for neffi in self.neffs_int_funcs])
+    
     def get_dif_neff(self, z):
-        return self.xp.array([neffd(z) for neffd in self.neffs_dif_funcs]) 
-
+        """Compute the derivative of effective indices at z"""
+        if self.backend == "jax":
+            import jax
+            import jax.numpy as jnp
+            
+            # FIXED: Use jacfwd to compute derivative of spline
+            # jacfwd computes the jacobian (derivative) of a function
+            # For our case: spline.evaluate: R -> R^Nmax, so jacobian is R^Nmax
+            jacobian = jax.jacfwd(self.neffs_spline.evaluate)(z)
+            
+            # Ensure it's properly shaped as (Nmax,)
+            return jnp.atleast_1d(jacobian)
+        else:
+            return self.xp.array([neffd(z) for neffd in self.neffs_dif_funcs])
+    
     def WKB_cor(self, z):
         dbeta_dz = self.k * self.get_dif_neff(z) 
         return -0.5 * dbeta_dz / (self.k * self.get_neff(z))
