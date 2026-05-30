@@ -2,7 +2,6 @@ import os
 
 backend_choice = os.environ.get("CBEAM_BACKEND", "numpy").lower()
 using_jax = backend_choice == "jax"
-
 if using_jax:
     import jax
     jax.config.update("jax_enable_x64", True)
@@ -194,7 +193,7 @@ class _JAXCubicSpline:
         return _Antideriv()
 
 
-def CubicSpline(x, y, axis=0, **kwargs):
+def myCubicSpline(x, y, axis=0, **kwargs):
     if using_jax:
         return _JAXCubicSpline(x, y, axis=axis)
     else:

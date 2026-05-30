@@ -13,7 +13,7 @@ from matplotlib.widgets import Slider
 
 from .backend import (
     get_xp, get_backend,
-    solve_ivp, interp1d, CubicSpline, UnivariateSpline,
+    solve_ivp, interp1d, myCubicSpline, UnivariateSpline,
 )
 
 from wavesolve.fe_solver import solve_waveguide, get_eff_index, construct_B, plot_scalar_mode
@@ -25,8 +25,6 @@ import numpy as np
 
 xp = get_xp()
 backend = get_backend()
-
-NUM_STEPS=400
 
 if backend == "jax":
     import jax
@@ -236,75 +234,6 @@ class Propagator:
     # alias
     prop_setup = characterize
 
-
-    def propagate(self, u0, zi=None, zf=None):
-        assert self.zs is not None, "no propagation data detected ... run characterize() or load() first"
-        if zi is None:
-            zi = float(self.zs[0])
-        if zf is None:
-            zf = float(self.zs[-1])
-
-
-        if len(self.zs) == 1:
-            return self.zs, self.xp.array([u0]), self.apply_phase(u0, zf, zi)
-        if zi > zf:
-            return self.backpropagate(u0, zi, zf)
-
-        # ========================= JAX CODEPATH =====================       
-        if self.backend == "jax":
-            import jax
-            import jax.numpy as jnp
-            from jax.experimental.ode import odeint
-
-            neffs_spline = CubicSpline(self.zs, self.neffs, axis=0)
-            int_neffs_func = neffs_spline.antiderivative()
-            dif_neffs_func = neffs_spline.derivative()
-            
-            # FIXED: Force the exact strict skew-symmetry that the NumPy path uses!
-            cmats_skew = 0.5 * (self.xp.swapaxes(self.cmats, 1, 2) - self.cmats)
-            M_spline = CubicSpline(self.zs, cmats_skew, axis=0)
-
-            def dz_dt(u, z, *args):
-                phases = (2 * jnp.pi / self.wl * (int_neffs_func(z) - int_neffs_func(zi))) % (2 * jnp.pi)
-                phase_mat = jnp.exp(1j * (phases[None, :] - phases[:, None]))
-                
-                M_z = M_spline(z)
-                neffs = neffs_spline(z)
-                
-                ddz = -1. / neffs * ((phase_mat * M_z) @ (u * neffs))
-                
-                # FIXED: Add missing WKB correction
-                if self.WKB:
-                    wkb_term = -0.5 * dif_neffs_func(z) / neffs
-                    ddz += wkb_term * u
-                    
-                return ddz
-
-            num_steps = NUM_STEPS 
-            z_grid = jnp.linspace(zi, zf, num_steps)
-            
-            # Enforce high-precision tolerances
-            us_grid = odeint(dz_dt, u0, z_grid, rtol=1e-12, atol=1e-10)
-            
-            uf = self.apply_phase(np.array(us_grid[-1]), float(z_grid[-1]))
-            return np.array(z_grid), np.array(us_grid), uf
-
-        else:            
-           
-            u0 = self.xp.array(u0, dtype=self.xp.complex128)
-            def deriv(z, u):
-                neffs = self.get_neff(z)
-                phases = (self.k * (self.get_int_neff(z) - self.get_int_neff(zi))) % (2 * self.xp.pi)
-                cmat = self.get_cmat(z)
-                phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
-                ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
-                if self.WKB: 
-                    ddz += self.WKB_cor(z) * u
-                return ddz
-            sol = solve_ivp(deriv, (zi, zf), u0, method=self.solver, rtol=1e-12, atol=1e-10)
-            uf = self.apply_phase(sol.y[:, -1], sol.t[-1])
-            return sol.t, sol.y.T, uf
-
     def apply_phase(self, u, z, zi=None):
         """ apply :math:`e^{i \\beta_j z}` phase variation to the mode amplitude of eigenmode j
         with propagation constant :math:`\\beta_j`.
@@ -318,9 +247,120 @@ class Propagator:
             zi = self.zs[0]
         phase = self.xp.exp(1.j * self.k * self.xp.array(self.get_int_neff(z) - self.get_int_neff(zi)))
         return u * phase
-    
 
-    def backpropagate(self, u0, zf=None, zi=None):
+    def propagate(self, u0, zi=None, zf=None):
+        assert self.zs is not None, "no propagation data detected ... run characterize() or load() first"
+        if zi is None:
+            zi = float(self.zs[0])
+        if zf is None:
+            zf = float(self.zs[-1])
+
+        if len(self.zs) == 1:
+            return self.zs, self.xp.array([u0]), self.apply_phase(u0, zf, zi)
+        if zi > zf:
+            return self.backpropagate(u0, zi, zf)
+
+        # ========================= JAX CODEPATH =====================       
+        if self.backend == "jax":
+            import jax
+            import jax.numpy as jnp
+            import diffrax
+            
+            neffs_spline   = self._prop_neffs_spline    # no rebuild
+            int_neffs_func = self._prop_int_neffs_func
+            dif_neffs_func = self._prop_dif_neffs_func
+            M_spline       = self._prop_M_spline
+
+            # 2. Define the derivative function matching Diffrax signature: (t, y, args)
+            # here t represents z, and y represents u
+            def dz_dt(z, u, args=None):
+                phases = (2 * jnp.pi / self.wl * (int_neffs_func(z) - int_neffs_func(zi))) % (2 * jnp.pi)
+                phase_mat = jnp.exp(1j * (phases[None, :] - phases[:, None]))
+                
+                M_z = M_spline(z)
+                neffs = neffs_spline(z)
+                
+                # Batch-agnostic contraction handles single or multi-field inputs instantly
+                ddz = -1. / neffs * jnp.einsum('ij,...j->...i', phase_mat * M_z, u * neffs)
+                
+                if self.WKB:
+                    wkb_term = -0.5 * dif_neffs_func(z) / neffs
+                    ddz += wkb_term * u
+                    
+                return ddz
+
+            # 3. Encapsulate the execution loop and JIT compile it completely
+            @jax.jit
+            def run_compiled_solve(u0):
+                term = diffrax.ODETerm(dz_dt)
+                solver = diffrax.Dopri5() # High-efficiency Dormand-Prince solver
+                stepsize_controller = diffrax.PIDController(rtol=1e-7, atol=1e-8)                
+                saveat = diffrax.SaveAt(t1=True)
+                sol = diffrax.diffeqsolve(
+                    term,
+                    solver,
+                    t0=zi,
+                    t1=zf,
+                    dt0=(zf - zi) * 0.01, # initial guess step-size
+                    y0=jnp.asarray(u0, dtype=jnp.complex128),
+                    saveat=saveat,
+                    stepsize_controller=stepsize_controller,
+                    max_steps=200_000,
+                )
+                return sol.ys, sol.ts
+
+            # 4. Execute the fully compiled kernel
+            u0_jnp = jnp.asarray(u0, dtype=jnp.complex128)
+            us_grid, z_grid = run_compiled_solve(u0_jnp)
+            
+            uf = self.apply_phase(np.array(us_grid[-1]), float(z_grid[-1]), zi)
+            return np.array(z_grid), np.array(us_grid), uf
+
+        # ========================= NUMPY/SCIPY CODEPATH =====================       
+        else:            
+            u0 = self.xp.array(u0, dtype=self.xp.complex128)
+            orig_shape = u0.shape
+            nmodes = orig_shape[-1]
+            
+            # Flatten any leading batch dimensions to a single axis for solve_ivp compatibility
+            if len(orig_shape) > 1:
+                u0_flat = u0.reshape(-1, nmodes)
+            else:
+                u0_flat = u0
+
+            def deriv(z, u_in):
+                neffs = self.get_neff(z)
+                phases = (self.k * (self.get_int_neff(z) - self.get_int_neff(zi))) % (2 * self.xp.pi)
+                cmat = self.get_cmat(z)
+                phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
+                
+                if len(orig_shape) > 1:
+                    u_curr = u_in.reshape(-1, nmodes)
+                    ddz = -1. / neffs * np.einsum('ij,...j->...i', phase_mat * cmat, u_curr * neffs)
+                    if self.WKB: 
+                        ddz += self.WKB_cor(z) * u_curr
+                    return ddz.flatten()
+                else:
+                    ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u_in * neffs)
+                    if self.WKB: 
+                        ddz += self.WKB_cor(z) * u_in
+                    return ddz
+
+            y0_input = u0_flat.flatten() if len(orig_shape) > 1 else u0_flat
+            sol = solve_ivp(deriv, (zi, zf), y0_input, method=self.solver, rtol=1e-7, atol=1e-8)
+            
+            num_steps = len(sol.t)
+            if len(orig_shape) > 1:
+                us_grid = sol.y.T.reshape(num_steps, *orig_shape[:-1], nmodes)
+                uf_flat = sol.y[:, -1].reshape(*orig_shape[:-1], nmodes)
+            else:
+                us_grid = sol.y.T
+                uf_flat = sol.y[:, -1]
+
+            uf = self.apply_phase(uf_flat, sol.t[-1], zi)
+            return sol.t, us_grid, uf
+
+    def backpropagate(self, u0, zi=None, zf=None):
         if zi is None:
             zi = self.zs[0]
         if zf is None:
@@ -332,13 +372,12 @@ class Propagator:
             import jax.numpy as jnp
             from jax.experimental.ode import odeint
 
-            neffs_spline = CubicSpline(self.zs, self.neffs, axis=0)
+            neffs_spline = myCubicSpline(self.zs, self.neffs, axis=0)
             int_neffs_func = neffs_spline.antiderivative()
             dif_neffs_func = neffs_spline.derivative()
             
-            # FIXED: Force the exact strict skew-symmetry that the NumPy path uses!
             cmats_skew = 0.5 * (self.xp.swapaxes(self.cmats, 1, 2) - self.cmats)
-            M_spline = CubicSpline(self.zs, cmats_skew, axis=0)
+            M_spline = myCubicSpline(self.zs, cmats_skew, axis=0)
 
             def dz_dt(u, z, *args):
                 phases = (2 * jnp.pi / self.wl * (int_neffs_func(z) - int_neffs_func(zi))) % (2 * jnp.pi)
@@ -347,8 +386,7 @@ class Propagator:
                 M_z = M_spline(z)
                 neffs = neffs_spline(z)
                 
-                # FIXED: Do NOT use M_z.conj().T here. odeint handles zi > zf backwards perfectly on its own
-                ddz = -1. / neffs * ((phase_mat * M_z) @ (u * neffs))
+                ddz = -1. / neffs * jnp.einsum('ij,...j->...i', phase_mat * M_z, u * neffs)
                 
                 if self.WKB:
                     wkb_term = -0.5 * dif_neffs_func(z) / neffs
@@ -356,39 +394,58 @@ class Propagator:
                     
                 return ddz
 
-            num_steps = NUM_STEPS
+            num_steps = 400
             z_grid = jnp.linspace(zi, zf, num_steps)
             
-            # Enforce high-precision tolerances
             us_grid = odeint(dz_dt, u0, z_grid, rtol=1e-12, atol=1e-10)
             
-            uf = self.apply_phase(np.array(us_grid[-1]), float(z_grid[-1]))
+            uf = self.apply_phase(np.array(us_grid[-1]), float(z_grid[-1]), zi)
             return np.array(z_grid), np.array(us_grid), uf
         
+        # ========================= NUMPY/SCIPY CODEPATH =====================
         else:
-            # NUMPY/SciPy fallback
             u0 = self.xp.array(u0, dtype=self.xp.complex128)
-            if zi is None:
-                zi = self.zs[0]
-            if zf is None:
-                zf = self.zs[-1]
+            orig_shape = u0.shape
+            nmodes = orig_shape[-1]
+            
+            if len(orig_shape) > 1:
+                u0_flat = u0.reshape(-1, nmodes)
+            else:
+                u0_flat = u0
 
-            def deriv(z, u):
+            def deriv(z, u_in):
                 zp = self.zs[-1] - z
                 neffs = self.get_neff(zp)
                 phases = (self.k * (self.get_int_neff(zp) - self.get_int_neff(zf))) % (2 * self.xp.pi)
                 cmat = self.get_cmat(zp)
                 phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
-                ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u * neffs)
-                if self.WKB:
-                    ddz += self.WKB_cor(zp) * u
-                return -ddz
+                
+                if len(orig_shape) > 1:
+                    u_curr = u_in.reshape(-1, nmodes)
+                    ddz = -1. / neffs * np.einsum('ij,...j->...i', phase_mat * cmat, u_curr * neffs)
+                    if self.WKB:
+                        ddz += self.WKB_cor(zp) * u_curr
+                    return -ddz.flatten()
+                else:
+                    ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u_in * neffs)
+                    if self.WKB:
+                        ddz += self.WKB_cor(zp) * u_in
+                    return -ddz
 
-            sol = solve_ivp(deriv, (self.zs[-1] - zf, self.zs[-1] - zi), u0, method=self.solver, rtol=1e-12, atol=1e-10)
-            uf = self.apply_phase(sol.y[:, -1], zi, zf)
-            return self.zs[-1] - sol.t, sol.y.T, uf
+            y0_input = u0_flat.flatten() if len(orig_shape) > 1 else u0_flat
+            sol = solve_ivp(deriv, (self.zs[-1] - zf, self.zs[-1] - zi), y0_input, method=self.solver, rtol=1e-12, atol=1e-10)
+            
+            num_steps = len(sol.t)
+            if len(orig_shape) > 1:
+                us_grid = sol.y.T.reshape(num_steps, *orig_shape[:-1], nmodes)
+                uf_flat = sol.y[:, -1].reshape(*orig_shape[:-1], nmodes)
+            else:
+                us_grid = sol.y.T
+                uf_flat = sol.y[:, -1]
 
-
+            uf = self.apply_phase(uf_flat, zi, zf)
+            return sol.t, us_grid, uf
+        
     #region other setup funcs
     def compute_neffs(self, zi=0, zf=None, mesh=None, tag='', save=False):
         """ compute the effective refractive indices through a waveguide, using an adaptive step scheme. also saves interpolation functions to self.neffs_funcs
@@ -445,7 +502,7 @@ class Propagator:
                     neff_interp = interp1d(zs[-N:], self.xp.array(neffs)[-N:, :], kind=N-1, axis=0, fill_value="extrapolate")
                     self.track_modes(vs[-1], v, neff_interp(z), neff)
                 else:
-                    neff_interp = CubicSpline(zs[-4:], neffs[-4:], axis=0)
+                    neff_interp = myCubicSpline(zs[-4:], neffs[-4:], axis=0)
                     self.track_modes(vs[-1], v, neff_interp(z), neff)
 
             if len(neffs) < 4 or self.fixed_zstep:
@@ -562,7 +619,7 @@ class Propagator:
                     neff_interp = interp1d(zs[-N:], self.xp.array(neffs)[-N:, :], kind=N-1, axis=0, fill_value="extrapolate")
                     self.track_modes(vs[-1], v, neff_interp(z), neff)
                 else:
-                    neff_interp = CubicSpline(zs[-4:], neffs[-4:], axis=0, extrapolate=True, bc_type='natural')
+                    neff_interp = myCubicSpline(zs[-4:], neffs[-4:], axis=0, extrapolate=True, bc_type='natural')
                     self.track_modes(vs[-1], v, neff_interp(z), neff)
             
             for gr in self.degen_groups:
@@ -587,7 +644,7 @@ class Propagator:
                 continue
             else:
                 # interpolate the modes
-                vinterp = CubicSpline(self.xp.array(zs[-4:]), vs_dec[-4:], axis=0)
+                vinterp = myCubicSpline(self.xp.array(zs[-4:]), vs_dec[-4:], axis=0)
                 refac = self._ref_fac_v(vdec, vs_dec[-1], vinterp(z))
                 if refac >= 0 or zstep0 == min_zstep:
                     if not hit_min_zstep and zstep0 == min_zstep:
@@ -623,7 +680,7 @@ class Propagator:
         self.meshpoints = self.xp.array(meshpoints)
         if save:
             self.save(zs, None, neffs, vs, self.meshpoints, tag=tag)
-        self.make_interp_funcs(zs, True, False, True)
+        self.make_interp_funcs(zs, True, True, True)
         if hit_min_zstep:
             print("\nwarning: hit minimum z step when computing modes")
         return zs, neffs, vs
@@ -668,7 +725,7 @@ class Propagator:
             _mesh.points = _mesh.points[:, :2]
         zi, zf = zs[0], zs[-1]
         print("\ncomputing coupling matrix ...")
-        vi = CubicSpline(zs, vs, axis=0)
+        vi = myCubicSpline(zs, vs, axis=0)
 
         _linear = (len(self.meshpoints) == 2)
 
@@ -679,7 +736,7 @@ class Propagator:
                 points = lambda z: slope * (z - zs[0]) + self.meshpoints[0]
                 dmeshdz = lambda z: slope
             else:
-                points = CubicSpline(zs, self.meshpoints, axis=0)
+                points = myCubicSpline(zs, self.meshpoints, axis=0)
                 dmeshdz = points.derivative()
 
         dvdz = vi.derivative()
@@ -707,7 +764,7 @@ class Propagator:
             cmats.append(cmat)
         cmats = self.xp.array(cmats)  
         self.cmats = cmats   
-        self.make_interp_funcs(zs, make_cmat=True)
+        self.make_interp_funcs(zs, make_cmat=True, make_neff=True, make_v=True)
         if save:
             self.save(cmats=cmats, tag=tag) 
         return cmats
@@ -799,7 +856,7 @@ class Propagator:
     
             if len(self.zs) > 1:
                 # JAX backend will create splines; numpy backend will create function lists
-                self.make_interp_funcs(self.zs, make_cmat=True, make_neff=False, make_v=False)
+                self.make_interp_funcs(self.zs, make_cmat=True, make_neff=True, make_v=True)
             else:
                 self.make_interp_funcs_zinv()
     
@@ -820,7 +877,7 @@ class Propagator:
             self.Nmax = self.neffs.shape[1]
         
         if len(self.zs) > 1:
-            self.make_interp_funcs(self.zs, make_cmat=False)
+            self.make_interp_funcs(self.zs, make_cmat=True, make_neff=True, make_v=True)
         else:
             self.make_interp_funcs_zinv()
 
@@ -896,6 +953,13 @@ class Propagator:
                 
                 self.neffs_int_funcs = neffs_int_funcs
                 
+                neffs_jax_spline = myCubicSpline(zs_jnp, jnp.asarray(self.neffs, dtype=jnp.float64), axis=0)
+                self._prop_neffs_spline   = neffs_jax_spline
+                self._prop_int_neffs_func = neffs_jax_spline.antiderivative()
+                self._prop_dif_neffs_func = neffs_jax_spline.derivative()
+
+                cmats_skew = 0.5 * (jnp.swapaxes(jnp.asarray(self.cmats), 1, 2) - jnp.asarray(self.cmats))
+                self._prop_M_spline =  myCubicSpline(zs_jnp, cmats_skew, axis=0)
                 # For derivatives, we'll compute them on-the-fly in get_dif_neff using jax.jacfwd
                 # No need to store individual derivative functions
     
@@ -911,9 +975,7 @@ class Propagator:
         # NUMPY BACKEND (CPU Fallback) - KEEP ORIGINAL
         # =====================================================================
         else:
-            import numpy as np
-            from scipy.interpolate import UnivariateSpline, CubicSpline
-    
+            import numpy as np    
             if make_cmat:
                 def make_c_func(i, j):
                     assert i < j, "i must be < j in make_interp_funcs()"
@@ -938,7 +1000,7 @@ class Propagator:
                 self.neffs_dif_funcs = [neff_func.derivative() for neff_func in neff_funcs]
     
             if make_v:
-                self.get_v = CubicSpline(zs, self.vs, axis=0)
+                self.get_v = myCubicSpline(zs, self.vs, axis=0)
     
     def make_interp_funcs_zinv(self):
         """Create interpolation functions for z-invariant waveguides"""
@@ -978,7 +1040,7 @@ class Propagator:
         if self.backend == "jax":
             import jax.numpy as jnp
             if not hasattr(self, '_cmat_spline_jax'):
-                self._cmat_spline_jax = CubicSpline(self.zs, self.cmats, axis=0)
+                self._cmat_spline_jax = myCubicSpline(self.zs, self.cmats, axis=0)
             raw_cmat = self._cmat_spline_jax(z)
             
             nmodes = int((1 + (1 + 8 * raw_cmat.shape[0])**0.5) // 2)
@@ -1011,7 +1073,7 @@ class Propagator:
         """Compute the mode effective indices at z"""
         if self.backend == "jax":
             if not hasattr(self, '_neffs_spline_jax'):
-                self._neffs_spline_jax = CubicSpline(self.zs, self.neffs, axis=0)
+                self._neffs_spline_jax = myCubicSpline(self.zs, self.neffs, axis=0)
             return self._neffs_spline_jax(z)
         else:
             if hasattr(self, 'neffs_spline') and self.neffs_spline is not None:
@@ -1026,7 +1088,7 @@ class Propagator:
                 # 1. Sample the exact global reference phases at all knot points for this segment
                 global_int_neffs = np.array([[neffi(zt) for neffi in self.neffs_int_funcs] for zt in self.zs])
                 # 2. Build a JAX cubic spline directly on top of these globally aligned values
-                self._int_neffs_spline_jax = CubicSpline(self.zs, global_int_neffs, axis=0)
+                self._int_neffs_spline_jax = myCubicSpline(self.zs, global_int_neffs, axis=0)
             return self._int_neffs_spline_jax(z)
         else:
             return self.xp.array([neffi(z) for neffi in self.neffs_int_funcs])
