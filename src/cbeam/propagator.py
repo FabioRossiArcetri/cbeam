@@ -319,36 +319,42 @@ class Propagator:
             uf = self.apply_phase(us_grid[-1], float(z_grid[-1]), zi)
             return z_grid, us_grid, uf
 
-        # ========================= NUMPY/SCIPY CODEPATH =====================       
+        # ========================= NUMPY/SCIPY CODEPATH ===================== 
         else:            
             u0 = self.xp.array(u0, dtype=self.xp.complex128)
             orig_shape = u0.shape
             nmodes = orig_shape[-1]
             
-            # Flatten any leading batch dimensions to a single axis for solve_ivp compatibility
             if len(orig_shape) > 1:
                 u0_flat = u0.reshape(-1, nmodes)
             else:
                 u0_flat = u0
 
+            k = 2 * self.xp.pi / self.wl
+            int_neffs_zi = self.get_int_neff(zi)
+
             def deriv(z, u_in):
                 neffs = self.get_neff(z)
-                phases = (self.k * (self.get_int_neff(z) - self.get_int_neff(zi))) % (2 * self.xp.pi)
                 cmat = self.get_cmat(z)
-                phase_mat = self.xp.exp(1.j * (phases[None, :] - phases[:, None]))
+                
+                p = self.xp.exp(1.j * k * (self.get_int_neff(z) - int_neffs_zi))
                 
                 if len(orig_shape) > 1:
                     u_curr = u_in.reshape(-1, nmodes)
-                    ddz = -1. / neffs * np.einsum('ij,...j->...i', phase_mat * cmat, u_curr * neffs)
+                    v = u_curr * neffs * p
+                    mat_vec = np.einsum('ij,...j->...i', cmat, v)
+                    ddz = - (np.conj(p) / neffs) * mat_vec
                     if self.WKB: 
                         ddz += self.WKB_cor(z) * u_curr
                     return ddz.flatten()
                 else:
-                    ddz = -1. / neffs * self.xp.dot(phase_mat * cmat, u_in * neffs)
+                    v = u_in * neffs * p
+                    mat_vec = self.xp.dot(cmat, v)
+                    ddz = - (self.xp.conj(p) / neffs) * mat_vec
                     if self.WKB: 
                         ddz += self.WKB_cor(z) * u_in
                     return ddz
-
+            
             y0_input = u0_flat.flatten() if len(orig_shape) > 1 else u0_flat
             sol = solve_ivp(deriv, (zi, zf), y0_input, method=self.solver, rtol=1e-7, atol=1e-8)
             
@@ -377,58 +383,65 @@ class Propagator:
             import jax.numpy as jnp
             import diffrax
 
-            # Ensure continuous properties are cached
-            self._prepare_jax_splines()
+            if not hasattr(self, '_master_spline'):
+                self._prepare_jax_splines()
 
-            # Mirror exact pure derivative signature used by forward pass
-            def _dz_dt_static(z, u, args):
-                zi_val, wl_val, wkb_flag, int_f, dif_f, neff_s, M_s = args
+            k = 2 * jnp.pi / self.wl
+            N = self.Nmax
+            int_neffs_zi = jnp.asarray(self.get_int_neff(zi))
+            
+            master_spline = self._master_spline
+            master_spline_deriv = getattr(self, '_master_spline_deriv', None)
+            wkb_flag = bool(self.WKB)
+
+            def _dz_dt_static(z, u, int_neffs_zi_val):
+                master_val = master_spline(z)
                 
-                phases = (2 * jnp.pi / wl_val * (int_f(z) - int_f(zi_val))) % (2 * jnp.pi)
-                phase_mat = jnp.exp(1j * (phases[None, :] - phases[:, None]))
+                M_z = master_val[:N*N].reshape((N, N))
+                neffs = master_val[N*N : N*N + N]
+                int_neffs_z = master_val[N*N + N : ]
                 
-                M_z = M_s(z)
-                neffs = neff_s(z)
+                p = jnp.exp(1j * k * (int_neffs_z - int_neffs_zi_val))
                 
-                ddz = -1. / neffs * jnp.einsum('ij,...j->...i', phase_mat * M_z, u * neffs)
+                # CORRECTED MATH
+                v = u * neffs * p 
+                mat_vec = jnp.einsum('ij,...j->...i', M_z, v)
+                ddz = - (jnp.conj(p) / neffs) * mat_vec
+                
                 if wkb_flag:
-                    ddz += (-0.5 * dif_f(z) / neffs) * u
+                    master_dval = master_spline_deriv(z)
+                    dif_neffs_z = master_dval[N*N : N*N + N]
+                    ddz += (-0.5 * dif_neffs_z / neffs) * u
+                    
                 return ddz
 
-            # Symmetric adaptive backpropagation tracking (zi down to zf)
             @jax.jit
-            def _run_adaptive_backward_solve(uf_val, z_grid, zi_val, zf_val):
+            def _run_adaptive_backward_solve(uf_val, z_grid, zi_val, zf_val, zi_int_neffs):
                 term = diffrax.ODETerm(_dz_dt_static)
                 solver = diffrax.Dopri5()
                 stepsize_controller = diffrax.PIDController(rtol=1e-7, atol=1e-8)
-                
-                args = (
-                    zi_val, self.wl, bool(self.WKB),
-                    self._prop_int_neffs_func, self._prop_dif_neffs_func,
-                    self._prop_neffs_spline, self._prop_M_spline
-                )
                 
                 sol = diffrax.diffeqsolve(
                     term,
                     solver,
                     t0=zi_val,
                     t1=zf_val,
-                    dt0=-0.1,  # Negative initial step-size guess for backward integration
+                    dt0=-0.1,  
                     y0=uf_val,
-                    args=args,
+                    args=zi_int_neffs,
                     saveat=diffrax.SaveAt(ts=z_grid),
                     stepsize_controller=stepsize_controller,
-                    max_steps=100000,
+                    max_steps=100_000,
                 )
                 return sol.ys
 
-            # Execution pass
+            NUM_STEPS = len(self.zs)
             z_grid = jnp.linspace(zi, zf, NUM_STEPS)
             uf_jnp = jnp.asarray(uf, dtype=jnp.complex128)
             
-            us_grid = _run_adaptive_backward_solve(uf_jnp, z_grid, zi, zf)
+            us_grid = _run_adaptive_backward_solve(uf_jnp, z_grid, zi, zf, int_neffs_zi)
             
-            ui = self.apply_phase(np.array(us_grid[-1]), float(z_grid[-1]), zi)
+            ui = self.apply_phase(jnp.array(us_grid[-1]), float(z_grid[-1]), zi)
             return np.array(z_grid), np.array(us_grid), ui
 
         
