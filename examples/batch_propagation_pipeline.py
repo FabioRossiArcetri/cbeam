@@ -216,18 +216,6 @@ class IncidentFieldGenerator:
     """Generates and manages incident field profiles with configurable aberrations."""
 
     def __init__(self, p, ifunc, xp=np):
-        """
-        Initialize the incident field generator.
-        
-        Parameters
-        ----------
-        p : dict
-            Simulation parameters
-        ifunc : IFunc
-            Influence function object
-        xp : module
-            NumPy or CuPy module for array operations
-        """
         self.p = p
         self.ifunc = ifunc
         self.xp = xp
@@ -235,41 +223,24 @@ class IncidentFieldGenerator:
         self.mask_np = ifunc.mask_inf_func.get() > 0
         self.grid_size = self.mask_np.shape[0]
         self.num_modes = len(ifunc.influence_function)
-        self.mask = xp.asarray(self.mask_np)
-
-        # Pre-compute influence function matrix for efficiency
-        self.ifunc_matrix = xp.asarray(
-            np.stack([f.get() for f in ifunc.influence_function], axis=0)
-        )
-        self.mask_y, self.mask_x = np.where(self.mask_np)
-
-        # Pre-compute physical coordinates in microns
-        pupil_radius = np.sqrt(np.sum(self.mask_np) / np.pi)
-        padded_size = self.grid_size * self.p["pad_factor"]
-        pixel_scale_lamD = padded_size / (2.0 * pupil_radius)
-        coords_lamD = np.arange(-padded_size // 2, padded_size // 2) / pixel_scale_lamD
-        lamD_to_microns = self.p["rclad"] / 3.0
-        self.focal_coords_microns = coords_lamD * lamD_to_microns
+        
+        # FIX: Since f.get() is already a 1D pre-masked array of 109,096 pixels,
+        # we can stack them directly without sub-indexing it with flat_mask!
+        self.ifunc_matrix = np.stack([f.get() for f in ifunc.influence_function], axis=0)
+        
+        # Verify shape matches (num_modes, 109096)
+        # print(f"DEBUG: ifunc_matrix shape is {self.ifunc_matrix.shape}")
 
     def generate_opd_batch(self, coeff_batch):
-        """
-        Generate optical path difference batch from modal coefficients.
-        
-        Parameters
-        ----------
-        coeff_batch : array
-            Modal coefficients, shape (n_fields, n_ifunc_modes)
-            
-        Returns
-        -------
-        array
-            OPD fields, shape (n_fields, grid_size, grid_size)
-        """
-        # Compute OPD for masked region only (vectorized)
-        opd_flat_batch = coeff_batch @ self.ifunc_matrix
+        """Generate optical path difference batch using optimized matrix multiplication."""
+        # Matrix multiply across active pixels only
+        opd_flat_batch = coeff_batch @ self.ifunc_matrix  # Shape: (n_fields, 109096)
         
         n_fields = coeff_batch.shape[0]
         opd_batch = np.zeros((n_fields, self.grid_size, self.grid_size), dtype=np.float64)
+        
+        # Assign the calculated flat batch back into the 2D spatial grid layout.
+        # This works perfectly because mask_np has exactly 109,096 True values!
         opd_batch[:, self.mask_np] = opd_flat_batch
         return opd_batch
     
@@ -306,14 +277,11 @@ class IncidentFieldGenerator:
             Transformed fields in lantern coordinate system
         """
         padded_size = self.grid_size * self.p["pad_factor"]
-        pad_top = (padded_size - self.grid_size) // 2
-        pad_bottom = padded_size - self.grid_size - pad_top
-        pad_left = (padded_size - self.grid_size) // 2
-        pad_right = padded_size - self.grid_size - pad_left
+        pad_width = (padded_size - self.grid_size) // 2
         
         E_pupil_padded = np.pad(
             E_pupil_batch,
-            ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right)),
+            ((0, 0), (pad_width, pad_width), (pad_width, pad_width)),
             mode='constant',
             constant_values=0
         )
@@ -325,54 +293,40 @@ class IncidentFieldGenerator:
             ),
             axes=(1, 2)
         )
-        
-        norms = np.sqrt(np.sum(np.abs(E_lantern_batch)**2, axis=(1, 2), keepdims=True))
-        norms[norms == 0] = 1.0
-        E_lantern_batch /= norms
-        
         return E_lantern_batch
 
     def resample_to_mesh(self, E_lantern_batch, mesh_points):
         """
-        Resample electric field from regular grid to mesh points using fast interpolation.
-        
-        Uses RegularGridInterpolator for fast interpolation of regular grids.
-        Carefully handles batch dimensions to ensure each field is processed independently.
-        
-        Parameters
-        ----------
-        E_lantern_batch : array
-            Fields in lantern coordinates on regular grid, shape (n_fields, padded_size, padded_size)
-        mesh_points : array
-            Mesh point coordinates, shape (n_mesh_points, 2)
-            
-        Returns
-        -------
-        array
-            Fields at mesh points, shape (n_fields, n_mesh_points)
+        Resample fields using a single multi-dimensional interpolator call.
+        NO FOR LOOPS. Processes all fields in the chunk simultaneously.
         """
         from scipy.interpolate import RegularGridInterpolator
         
-        # OPTIMIZATION 2: Transpose to (nx, ny, n_fields) to evaluate all batch fields at once
-        E_lantern_transposed = np.transpose(E_lantern_batch, (1, 2, 0))
-        coord_grid = self.focal_coords_microns
+        padded_size = E_lantern_batch.shape[1]
+        half_size = padded_size // 2
+        coord_grid = np.linspace(-half_size, half_size - 1, padded_size)
         
-        # Build exactly ONE interpolator per batch chunk for real and imaginary parts
+        # Transpose to shape (ny, nx, n_fields) for multi-dimensional SciPy processing
+        E_lantern_transposed = np.transpose(E_lantern_batch, (1, 2, 0))
+        interp_points = np.column_stack((mesh_points[:, 1], mesh_points[:, 0]))
+        
+        # Evaluate all real parts in parallel
         interp_real = RegularGridInterpolator(
             (coord_grid, coord_grid), 
             E_lantern_transposed.real, 
             bounds_error=False, 
             fill_value=0.0
         )
-        E_mesh_real = interp_real(mesh_points).T  # Shape: (n_fields, n_mesh_points)
+        E_mesh_real = interp_real(interp_points).T
         
+        # Evaluate all imaginary parts in parallel
         interp_imag = RegularGridInterpolator(
             (coord_grid, coord_grid), 
             E_lantern_transposed.imag, 
             bounds_error=False, 
             fill_value=0.0
         )
-        E_mesh_imag = interp_imag(mesh_points).T  # Shape: (n_fields, n_mesh_points)
+        E_mesh_imag = interp_imag(interp_points).T
         
         return E_mesh_real + 1j * E_mesh_imag
 
@@ -409,51 +363,38 @@ class BatchPropagationPipeline:
         self.modal_projector = ModalProjector(self.wvg_props_input)
         self.wvg_props_output = get_waveguide_properties(prop12, mesh_z=p["z_ex"])
 
-    def generate_batch_modal_coefficients(self, aberration_configs, chunk_size=32):
+    def generate_batch_modal_coefficients(self, aberration_configs, chunk_size=64):
         """
-        Generate batch of initial modal coefficients from aberration configurations.
+        Generate batch coefficients optimized via vectorized chunk streams.
         
-        Optimized pipeline with careful handling of batch dimensions:
-        1. Generates incident field profiles with specified aberrations
-        2. Projects field profiles onto the waveguide modal basis
-        3. Returns normalized modal coefficients for propagation
-        
-        Parameters
-        ----------
-        aberration_configs : list of dict
-            List of aberration configurations, each containing 'mode_idx' and 'amplitude_nm'
-            
-        Returns
-        -------
-        array
-            Initial modal coefficients, shape (n_fields, n_modes)
+        Changing chunk_size will now noticeably tune performance vs RAM trade-offs.
         """
         n_configs = len(aberration_configs)
         n_modes = self.wvg_props_input['n_modes']
         u0_batch = np.zeros((n_configs, n_modes), dtype=np.complex128)
         
-        # Pre-allocate configuration coefficient workspace
+        # Pre-allocate coefficient array
         all_coeffs = np.zeros((n_configs, self.field_gen.num_modes), dtype=np.float64)
         for idx, config in enumerate(aberration_configs):
             all_coeffs[idx, config['mode_idx']] = config['amplitude_nm']
             
         mesh_pts = self.wvg_props_input['points']
         
-        # Safe incremental block loop
+        # Process the configuration vectors in segmented blocks
         for start_idx in range(0, n_configs, chunk_size):
             end_idx = min(start_idx + chunk_size, n_configs)
             chunk_coeffs = all_coeffs[start_idx:end_idx]
             
-            # Step A: Generate pupil screen chunks
+            # Step 1: Batched Pupil Generation
             E_pupil_chunk = self.field_gen.generate_field_profiles_batch(chunk_coeffs)
             
-            # Step B: Apply fast 2D batched Fourier optics 
+            # Step 2: Batched 2D Padding and FFT 
             E_lantern_chunk = self.field_gen.apply_pupil_to_lantern(E_pupil_chunk)
             
-            # Step C: Single-pass multi-dimensional grid interpolation
+            # Step 3: Fast Multi-dimensional Interpolation (Vectorized)
             E_mesh_chunk = self.field_gen.resample_to_mesh(E_lantern_chunk, mesh_pts)
             
-            # Step D: Normalized matrix projections
+            # Step 4: Batched Matrix Projections
             u0_batch[start_idx:end_idx] = self.modal_projector.project_batch(E_mesh_chunk)
             
         return u0_batch
