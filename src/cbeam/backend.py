@@ -3,6 +3,7 @@ import os
 backend_choice = os.environ.get("CBEAM_BACKEND", "numpy").lower()
 using_jax = backend_choice == "jax"
 if using_jax:
+    os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as xp
