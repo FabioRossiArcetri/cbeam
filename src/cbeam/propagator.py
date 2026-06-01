@@ -254,9 +254,9 @@ class Propagator:
     def propagate(self, u0, zi=None, zf=None):
         assert self.zs is not None, "no propagation data detected ... run characterize() or load() first"
         if zi is None:
-            zi = float(self.zs[0])
+            zi = float(self.zs.at[0].get() if self.backend == "jax" else self.zs[0])
         if zf is None:
-            zf = float(self.zs[-1])
+            zf = float(self.zs.at[-1].get() if self.backend == "jax" else self.zs[-1])
 
         if len(self.zs) == 1:
             return self.zs, self.xp.array([u0]), self.apply_phase(u0, zf, zi)
@@ -316,7 +316,8 @@ class Propagator:
             u0_jnp = jnp.asarray(u0, dtype=jnp.complex128)
             us_grid, z_grid = run_compiled_solve(u0_jnp)
             
-            uf = self.apply_phase(us_grid[-1], float(z_grid[-1]), zi)
+            uf = self.apply_phase(us_grid.at[-1].get() if self.backend == "jax" else us_grid[-1], 
+                                  float(z_grid.at[-1].get() if self.backend == "jax" else z_grid[-1]), zi)
             return z_grid, us_grid, uf
 
         # ========================= NUMPY/SCIPY CODEPATH ===================== 
