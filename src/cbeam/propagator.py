@@ -252,7 +252,7 @@ class Propagator:
                 ddz += self.WKB_cor(z)*u
             return ddz
         
-        sol = solve_ivp(deriv,(zi,zf),u0,self.solver,rtol=1e-12,atol=1e-10)
+        sol = solve_ivp(deriv,(zi,zf),u0,self.solver,rtol=1e-12,atol=1e-10, t_eval=[zf])
         # multiply by phase factors
         uf = self.apply_phase(sol.y[:,-1],sol.t[-1])
         return sol.t,sol.y.T,uf
@@ -291,7 +291,7 @@ class Propagator:
                 ddz += self.WKB_cor(zp)*u
             return -ddz
 
-        sol = solve_ivp(deriv,(self.zs[-1]-zf,self.zs[-1]-zi),u0,self.solver,rtol=1e-12,atol=1e-10)
+        sol = solve_ivp(deriv,(self.zs[-1]-zf,self.zs[-1]-zi),u0,self.solver,rtol=1e-12,atol=1e-10, t_eval=[zf])
         # multiply by phase factors
         uf = self.apply_phase(sol.y[:,-1],zi,zf)
         return self.zs[-1]-sol.t,sol.y.T,uf
