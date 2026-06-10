@@ -236,7 +236,8 @@ class Propagator:
                     y0=jnp.asarray(u0_val, dtype=jnp.complex128),
                     # SaveAt(t1=True) keeps only the final state → minimal memory
                     saveat=diffrax.SaveAt(t1=True),
-                    stepsize_controller=diffrax.PIDController(rtol=1e-7, atol=1e-8),
+                    #saveat=diffrax.SaveAt(steps=True), # for fair comparison with numpy path
+                    stepsize_controller=diffrax.PIDController(rtol=1e-12, atol=1e-10),
                     max_steps=200_000,
                 )
                 return sol.ys, sol.ts
@@ -278,8 +279,8 @@ class Propagator:
 
             y0_input = u0_flat.flatten() if len(orig_shape) > 1 else u0_flat
             sol = solve_ivp(deriv, (zi, zf), y0_input,
-                            method=self.solver, rtol=1e-7, atol=1e-8, 
-                            first_step=abs(zf-zi)*0.01, t_eval=[zf])
+                            method=self.solver, rtol=1e-12, atol=1e-10, 
+                            first_step=abs(zf-zi)*0.01, t_eval=[zf]) # removing t_eval=[zf] means to compute and return all internal steps
 
             num_steps = len(sol.t)
             if len(orig_shape) > 1:
@@ -345,7 +346,8 @@ class Propagator:
                     dt0=(zf - zi) * 0.01,   # negative, since zf < zi
                     y0=jnp.asarray(uf_val, dtype=jnp.complex128),
                     saveat=diffrax.SaveAt(t1=True),
-                    stepsize_controller=diffrax.PIDController(rtol=1e-7, atol=1e-8),
+                    # saveat=diffrax.SaveAt(steps=True), # for fair comparison with numpy path
+                    stepsize_controller=diffrax.PIDController(rtol=1e-12, atol=1e-10),
                     max_steps=200_000,
                 )
                 return sol.ys, sol.ts
@@ -385,8 +387,8 @@ class Propagator:
             sol = solve_ivp(deriv,
                             (self.zs[-1] - zf, self.zs[-1] - zi),
                             y0_input, 
-                            method=self.solver, rtol=1e-7, atol=1e-8,
-                            first_step=abs(zf-zi)*0.01, t_eval=[zf] )
+                            method=self.solver, rtol=1e-12, atol=1e-10,
+                            first_step=abs(zf-zi)*0.01, t_eval=[zf])  # removing t_eval=[zf] means to compute and return all internal steps
 
             num_steps = len(sol.t)
             if len(orig_shape) > 1:

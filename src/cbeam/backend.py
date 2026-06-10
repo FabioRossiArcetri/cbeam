@@ -75,9 +75,11 @@ def solve_ivp(fun, t_span, y0, **kwargs):
         else:
             # Save only the endpoint — avoids allocating a per-step buffer.
             saveat = diffrax.SaveAt(t1=True)
+            # saveat=diffrax.SaveAt(steps=True) # for fair comparison with numpy path
 
-        rtol = kwargs.get("rtol", 1e-6)
-        atol = kwargs.get("atol", 1e-6)
+
+        rtol = kwargs.get("rtol", 1e-12)
+        atol = kwargs.get("atol", 1e-10)
         stepsize_controller = diffrax.PIDController(rtol=rtol, atol=atol)
 
         out = diffrax.diffeqsolve(
