@@ -280,7 +280,7 @@ class Propagator:
             y0_input = u0_flat.flatten() if len(orig_shape) > 1 else u0_flat
             sol = solve_ivp(deriv, (zi, zf), y0_input,
                             method=self.solver, rtol=1e-12, atol=1e-10, 
-                            first_step=abs(zf-zi)*0.01, t_eval=[zf]) # removing t_eval=[zf] means to compute and return all internal steps
+                            first_step=abs(zf-zi)*0.01, ) # removing t_eval=[zf] means to compute and return all internal steps
 
             num_steps = len(sol.t)
             if len(orig_shape) > 1:
@@ -388,7 +388,7 @@ class Propagator:
                             (self.zs[-1] - zf, self.zs[-1] - zi),
                             y0_input, 
                             method=self.solver, rtol=1e-12, atol=1e-10,
-                            first_step=abs(zf-zi)*0.01, t_eval=[zf])  # removing t_eval=[zf] means to compute and return all internal steps
+                            first_step=abs(zf-zi)*0.01, )  # removing t_eval=[zf] means to compute and return all internal steps
 
             num_steps = len(sol.t)
             if len(orig_shape) > 1:
