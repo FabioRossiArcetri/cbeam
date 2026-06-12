@@ -62,10 +62,92 @@ L1 = 50000
 L2 = 50000
 
 DEFAULT_WAVELENGTH_UM   = 0.8
-DEFAULT_WAVELENGTH_NM   = 1550.0
+DEFAULT_WAVELENGTH_NM   = 800.0 # 1550.0
 DEFAULT_GRID_RESOLUTION = 400
 DEFAULT_SUBPIXEL_N      = 7
 
+def diagnose_input_psf(pipeline):
+    """
+    Diagnostic tool to generate and plot the unaberrated input PSF 
+    at the FFT grid level and after resampling onto the waveguide mesh.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.interpolate import griddata
+
+    print("\n=== RUNNING INPUT PSF CENTERING & SCALE DIAGNOSTIC ===")
+    
+    # 1. Generate an all-zero aberration matrix (Unaberrated Field)
+    fg_np = pipeline._field_gen_np
+    n_total_modes = fg_np.num_modes
+    zero_coeffs = np.zeros((1, n_total_modes))
+    
+    # 2. Extract intermediate states from the generator
+    E_pupil = fg_np.generate_field_profiles_batch(zero_coeffs)
+    E_focal_grid = fg_np.apply_pupil_to_lantern(E_pupil)[0] # Focal plane grid before mesh projection
+    E_mesh_sampled = fg_np.resample_to_mesh(E_focal_grid[None, ...])[0] # Resampled onto FE mesh
+    
+    # Compute intensities
+    intensity_fft_grid = np.abs(E_focal_grid) ** 2
+    intensity_mesh = np.abs(E_mesh_sampled) ** 2
+    
+    # 3. Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Left Plot: Raw FFT Grid Space
+    padded_size = fg_np.grid_size * pipeline.p["pad_factor"]
+    half_size = padded_size // 2
+    
+    im1 = axes[0].imshow(
+        np.log10(intensity_fft_grid + 1e-8), 
+        cmap='viridis', 
+        extent=[-half_size, half_size, -half_size, half_size]
+    )
+    axes[0].axvline(0, color='r', linestyle='--', alpha=0.5, label='Grid Center')
+    axes[0].axhline(0, color='r', linestyle='--', alpha=0.5)
+    axes[0].set_title("Raw FFT Focal Plane Grid\n(Log10 Intensity)")
+    axes[0].set_xlabel("FFT Pixels (Relative to Center)")
+    axes[0].set_ylabel("FFT Pixels (Relative to Center)")
+    axes[0].legend()
+    fig.colorbar(im1, ax=axes[0], label="Log Intensity")
+    
+    # Right Plot: Resampled onto the Photonic Lantern Mesh Space
+    mesh_pts = pipeline.wvg_props_input['mesh'].points
+    x_min, x_max = mesh_pts[:, 0].min(), mesh_pts[:, 0].max()
+    y_min, y_max = mesh_pts[:, 1].min(), mesh_pts[:, 1].max()
+    
+    # Grid data for smooth visualization of the unstructured FE mesh points
+    grid_x, grid_y = np.meshgrid(np.linspace(x_min, x_max, 400), np.linspace(y_min, y_max, 400))
+    mesh_grid_intensity = griddata(
+        (mesh_pts[:, 0], mesh_pts[:, 1]), intensity_mesh, 
+        (grid_x, grid_y), method='linear', fill_value=0
+    )
+    
+    im2 = axes[1].imshow(
+        mesh_grid_intensity, 
+        cmap='inferno', 
+        extent=[x_min, x_max, y_min, y_max],
+        origin='lower'
+    )
+    
+    # Overlay the ideal core centers to check alignment
+    core_pts = np.array(pipeline.wvg_props_input['points'])
+    axes[1].scatter(core_pts[:, 1], core_pts[:, 0], c='cyan', s=25, edgecolor='k', marker='o', label='Lantern Cores')
+    axes[1].set_title("PSF Projected onto Waveguide Mesh\n(Linear Intensity)")
+    axes[1].set_xlabel("Physical X (μm)")
+    axes[1].set_ylabel("Physical Y (μm)")
+    axes[1].legend()
+    fig.colorbar(im2, ax=axes[1], label="Linear Intensity")
+    
+    plt.tight_layout()
+    plt.show()
+
+    # Print numerical diagnostic metric
+    peak_idx = np.unravel_index(np.argmax(intensity_fft_grid), intensity_fft_grid.shape)
+    print(f"-> FFT Numerical Grid Shape: {intensity_fft_grid.shape}")
+    print(f"-> Expected Peak Index: ({half_size}, {half_size})")
+    print(f"-> Actual Peak Index:   {peak_idx}")
+    print(f"-> Centering Offset:     ({peak_idx[0] - half_size} px, {peak_idx[1] - half_size} px)")
 
 def _jax_fft_batch(E_pupil_batch, pad_width):
     """JIT-compiled zero-pad + FFT for a batch of pupil fields (JAX only)."""
@@ -102,6 +184,7 @@ def get_simulation_parameters():
         "core_res":      16,
         "clad_res":      60,
         "jack_res":      30,
+        "pixel_scale_um": 0.8,
         "ifunc_file":    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/'
                          'ANDES_400pix_all_modes.fits',
     }
@@ -219,29 +302,44 @@ class IncidentFieldGenerator:
             [f.get() for f in ifunc.influence_function], axis=0)
 
     def precompute_interpolation_weights(self, mesh_points):
-        """Precompute static bilinear grid mappings from the padded FFT grid
-        to the FE mesh.  Call once after construction."""
+        """
+        Precompute static bilinear grid mappings from the padded FFT grid
+        to the FE mesh, corrected for the half-pixel centering shift.
+        """
         padded_size = self.grid_size * self.p["pad_factor"]
-        half_size   = padded_size // 2
+        
+        # FIX: Use the true geometric center of an even-sized grid 
+        # (e.g., 799.5 instead of 800 for a 1600-pixel wide grid)
+        center_offset = (padded_size - 1) / 2.0
 
-        iy0 = self.xp.floor(mesh_points[:, 1] + half_size).astype(self.xp.int32)
+        pixel_scale = self.p.get("pixel_scale_um", 1.0)
+
+        # Map physical coordinates (microns) directly to continuous pixel indices
+        mesh_x_pix = (mesh_points[:, 0] / pixel_scale) + center_offset
+        mesh_y_pix = (mesh_points[:, 1] / pixel_scale) + center_offset
+
+        # Calculate flooring and interpolation weights using the corrected indices
+        iy0 = self.xp.floor(mesh_y_pix).astype(self.xp.int32)
         iy1 = iy0 + 1
-        ix0 = self.xp.floor(mesh_points[:, 0] + half_size).astype(self.xp.int32)
+        ix0 = self.xp.floor(mesh_x_pix).astype(self.xp.int32)
         ix1 = ix0 + 1
 
-        wy1 = (mesh_points[:, 1] + half_size) - iy0
+        wy1 = mesh_y_pix - iy0
         wy0 = 1.0 - wy1
-        wx1 = (mesh_points[:, 0] + half_size) - ix0
+        wx1 = mesh_x_pix - ix0
         wx0 = 1.0 - wx1
 
+        # Boundary validation mask
         valid = ((iy0 >= 0) & (iy1 < padded_size) &
                  (ix0 >= 0) & (ix1 < padded_size))
 
+        # Clip indices safely to boundaries
         iy0 = self.xp.clip(iy0, 0, padded_size - 1)
         iy1 = self.xp.clip(iy1, 0, padded_size - 1)
         ix0 = self.xp.clip(ix0, 0, padded_size - 1)
         ix1 = self.xp.clip(ix1, 0, padded_size - 1)
 
+        # Store arrays back to the class instance
         self.iy0 = self.xp.asarray(iy0)
         self.iy1 = self.xp.asarray(iy1)
         self.ix0 = self.xp.asarray(ix0)
