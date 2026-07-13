@@ -2,13 +2,11 @@ from juliacall import Main as jl
 from .backend import get_xp
 import os, cbeam
 
-#from juliacall import Pkg as jlPkg
 from juliacall import Main as jl
-jlPkg = jl.Pkg
 
-jlPkg.activate(os.path.dirname(cbeam.__file__)+"/FEval")
-jl.seval("using FEval")
-
+# Load Pkg natively using Julia syntax
+jl.seval("using Pkg")
+Pkg = jl.Pkg
 xp = get_xp()
 
 def create_tree(points,connections):

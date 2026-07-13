@@ -5,3 +5,7 @@ version = "0.1.0"
 
 [deps]
 PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+SymbolicRegression = "8254be44-1295-4e6a-a16d-46603ac705cb"
+
+[compat]
+SymbolicRegression = "1.13.2"
