@@ -7,27 +7,100 @@ from itertools import combinations
 from .backend import get_xp
 import matplotlib.pyplot as plt
 
-
 xp = get_xp()
 
+import math
+import matplotlib.pyplot as plt
+from matplotlib.patches import RegularPolygon
+import numpy as np
+
+def hex_ring_positions(rings, core_spacing=1.0, plot=False):
+    """
+    Returns (x, y) coordinates for a hexagonal (round) tiling of 'rings' layers.
+    Index 0 is guaranteed to be the centre (0,0). The rest are ordered by
+    ring radius and then by angle.
+
+    Parameters:
+        rings : int
+            Number of rings (>= 1).
+            rings=1 -> centre only (1 point)
+            rings=2 -> centre + 1 ring (7 points)
+            rings=3 -> centre + 2 rings (19 points)
+            rings=4 -> centre + 3 rings (37 points)
+            ...
+        core_spacing : float, default=1.0
+            Centre-to-centre distance between adjacent hexagons.
+        plot : bool, default=False
+            If True, displays a plot of the hexagonal tiling with each output
+            position labelled by its index.
+
+    Returns:
+        list of (float, float)
+            Coordinates in the plane, scaled by core_spacing. 
+            positions[0] is always (0,0).
+    """
+    if rings < 1:
+        raise ValueError("rings must be >= 1")
+
+    R = rings - 1
+    raw_positions = []
+
+    for q in range(-R, R + 1):
+        for r in range(-R, R + 1):
+            if max(abs(q), abs(r), abs(q + r)) <= R:
+                x = (q + r / 2.0) * core_spacing
+                y = (math.sqrt(3) / 2.0) * r * core_spacing
+                ring_rad = max(abs(q), abs(r), abs(q + r))
+                angle = math.atan2(y, x)
+                raw_positions.append((x, y, ring_rad, angle))
+
+    # Sort: centre first, then by ring, then by angle
+    raw_positions.sort(key=lambda p: (p[2], p[3]))
+    positions = [(x, y) for x, y, _, _ in raw_positions]
+
+    # Optional plotting
+    if plot:
+        fig, ax = plt.subplots(figsize=(7, 7))
+        ax.set_aspect('equal')
+
+        hex_radius = core_spacing / math.sqrt(3)
+
+        # --- ROTATED HEXAGONS BY 90° ---
+        # Previously orientation = np.pi/2 (pointy-top)
+        # Now orientation = 0 (flat-top) – i.e. rotated by 90°
+        hex_orientation = 0.0   # flat-top
+
+        colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(positions)))
+
+        for i, (x, y) in enumerate(positions):
+            hexagon = RegularPolygon(
+                (x, y),
+                numVertices=6,
+                radius=hex_radius,
+                orientation=hex_orientation,
+                facecolor=colors[i],
+                edgecolor='black',
+                linewidth=1,
+                alpha=0.7
+            )
+            ax.add_patch(hexagon)
+            text_color = 'white' if core_spacing > 0.5 else 'black'
+            ax.text(x, y, str(i), ha='center', va='center',
+                    fontsize=8, weight='bold', color=text_color)
+
+        margin = 0.6 * core_spacing
+        xs, ys = zip(*positions)
+        ax.set_xlim(min(xs) - margin, max(xs) + margin)
+        ax.set_ylim(min(ys) - margin, max(ys) + margin)
+        ax.set_title(f"{len(positions)} outputs ({rings} ring{'s' if rings>1 else ''}), spacing = {core_spacing}")
+        ax.axis('off')
+        plt.tight_layout()
+        plt.show()
+
+    return positions
 
 def get_19port_positions(core_spacing):
-    pos= [[0,0]]
-    for i in range(6):
-        xpos = core_spacing*xp.cos(i*xp.pi/3)
-        ypos = core_spacing*xp.sin(i*xp.pi/3)
-        pos.append([xpos,ypos])
-
-    startpos = xp.array([2*core_spacing,0])
-    startang = 2*xp.pi/3
-    pos.append(startpos)
-    for i in range(11):
-        if i%2==0 and i!=0:
-            startang += xp.pi/3
-        nextpos = startpos + xp.array([core_spacing*xp.cos(startang),core_spacing*xp.sin(startang)])
-        pos.append(nextpos)
-        startpos = nextpos
-    return xp.array(pos)
+    return hex_ring_positions(rings=3, core_spacing=core_spacing, plot=False)
 
 
 # ------------------- Plotting/mesh loading functions ------------------- #

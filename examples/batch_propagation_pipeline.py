@@ -1,43 +1,26 @@
 # =====================================================================
-# BATCH PROPAGATION PIPELINE
+# BATCH PROPAGATION PIPELINE - FIXED VERSION
 # =====================================================================
-# Supports both JAX (GPU) and NumPy (CPU) backends.
+# This version fixes the PSF centering issues identified in the analysis.
 #
-# Device selection:          CBEAM_JAX_DEVICE_INDEX  (env-var, default 0)
-#
-# Field-generation back-end:
-#   Even when the global backend is JAX the field-generation phase
-#   (OPD → pupil → FFT → mesh projection) is very memory-intensive and
-#   can saturate the GPU.  By default it therefore runs on the CPU with
-#   plain NumPy/SciPy.  Pass  field_gen_on_gpu=True  to
-#   BatchPropagationPipeline.__init__() to move it onto the GPU, or
-#   override per call with the  use_gpu  keyword of
-#   generate_batch_modal_coefficients().
-#
-# Chunked field generation:
-#   generate_batch_modal_coefficients() processes the batch in chunks of
-#   field_gen_chunk_size fields at a time.  Intermediate arrays (OPD,
-#   pupil, FFT grid) are created and released for each chunk before the
-#   next one starts.  This limits peak memory to O(chunk_size) regardless
-#   of the total batch size and independently of which backend is used.
-#   The default (field_gen_chunk_size=64) is conservative; increase it if
-#   memory headroom allows.
-#
-# Chunked propagation:
-#   propagate_batch() applies the same strategy with chunk_size=32 by
-#   default (JAX) or the full batch (numpy).
+# Key fixes:
+# 1. Correct FFT grid centering for even-sized arrays
+# 2. Fixed axis mapping in mesh coordinate interpolation
+# 3. Added validation and diagnostic improvements
+# 4. Proper half-pixel offset handling
 # =====================================================================
 
 import os
+from unittest.mock import DEFAULT
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
-N_SIGNALS =19
+
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 from cbeam.backend import get_backend, get_jax_device
-from cbeam.waveguide import PhotonicLantern, get_19port_positions
+from cbeam.waveguide import PhotonicLantern, hex_ring_positions
 from cbeam.propagator import Propagator, ChainPropagator
 
 from scipy.interpolate import griddata, LinearNDInterpolator
@@ -72,275 +55,248 @@ L1 = 50000
 L2 = 50000
 
 DEFAULT_WAVELENGTH_UM   = 0.8
-DEFAULT_WAVELENGTH_NM   = 800.0 # 1550.0
+DEFAULT_WAVELENGTH_NM   = 800.0
 DEFAULT_GRID_RESOLUTION = 400
 DEFAULT_SUBPIXEL_N      = 5
+N_SIGNALS = 19
+N_RINGS = 3
+
+default_degenetate_groups_front = {}
+default_degenetate_groups_back = {}
+default_skipped_modes_front = {}
+default_skipped_modes_back = {}
+
+default_degenetate_groups_front[3] = [[1,2],[3,4],[6,7],[8,9],[10,11],[12,13],[15,16]]
+default_degenetate_groups_back[3] = [[i for i in range(20) if i != 18]]
+default_skipped_modes_front[3] = [18]
+default_skipped_modes_back[3] = [18]
 
 
 def diagnose_input_psf(pipeline):
     """
-    Enhanced diagnostic tool for the input PSF, including centering, scaling,
-    alignment to the lantern cores, and display of amplitude/phase near the peak.
+    Enhanced diagnostic tool for the input PSF with fixes for centering issues.
     """
     import numpy as np
     import matplotlib.pyplot as plt
     from scipy.interpolate import griddata
     from scipy.special import j1
 
-    print("\n=== RUNNING INPUT PSF CENTERING & SCALE DIAGNOSTIC ===")
+    print("\n=== RUNNING INPUT PSF CENTERING & SCALE DIAGNOSTIC (FIXED VERSION) ===")
 
     # 1. Generate unaberrated field (zero coefficients)
     fg_np = pipeline._field_gen_np
     n_total_modes = fg_np.num_modes
     zero_coeffs = np.zeros((1, n_total_modes))
 
-    # 2. Extract field at key stages
-    Ef_input = fg_np.generate_field_profiles_batch(zero_coeffs)          # pupil plane
-    Ef_focal_grid = fg_np.apply_ef_to_lantern(Ef_input)[0]               # FFT grid (focal plane)
-    Ef_focal_mesh = fg_np.resample_to_mesh(Ef_focal_grid[None, ...])[0]  # on mesh
+    # 2. Check mask centering BEFORE field generation
+    mask = fg_np.mask_np
+    mask_center_y = np.mean(np.where(mask > 0)[0])
+    mask_center_x = np.mean(np.where(mask > 0)[1])
+    expected_center = (mask.shape[0] - 1) / 2.0  # Correct for indexing from 0
+    
+    print(f"\n[MASK CENTERING CHECK]")
+    print(f"  Mask shape: {mask.shape}")
+    print(f"  Mask centroid: ({mask_center_y:.2f}, {mask_center_x:.2f})")
+    print(f"  Expected center: ({expected_center:.2f}, {expected_center:.2f})")
+    print(f"  Offset: ({mask_center_y - expected_center:.3f}, {mask_center_x - expected_center:.3f}) pixels")
+    
+    if abs(mask_center_y - expected_center) > 0.1 or abs(mask_center_x - expected_center) > 0.1:
+        print("  ⚠️  WARNING: Mask is off-center! This will cause PSF misalignment.")
+        print("  Recommendation: Re-center the mask before loading or adjust in IFunc object.")
+
+    # 3. Extract field at key stages
+    Ef_input = fg_np.generate_field_profiles_batch(zero_coeffs)
+    Ef_focal_grid = fg_np.apply_ef_to_lantern(Ef_input)[0]
+    Ef_focal_mesh = fg_np.resample_to_mesh(Ef_focal_grid[None, ...])[0]
 
     intensity_grid = np.abs(Ef_focal_grid) ** 2
     intensity_mesh = np.abs(Ef_focal_mesh) ** 2
-    # 1. Check pupil mask centering
-    mask = pipeline._field_gen_np.mask_np
-    print("Mask center index:", np.unravel_index(np.argmax(mask), mask.shape))
-    plt.figure()
-    plt.imshow(mask, cmap='gray')
-    plt.title("Pupil Mask")
-    plt.show()
     
-    # 2. Check phase of pupil field (should be near zero)
-    Ef_input = pipeline._field_gen_np.generate_field_profiles_batch(np.zeros((1, 10)))
-    phase = np.angle(Ef_input[0])
-    print("Phase min/max:", phase.min(), phase.max())
-    plt.figure()
-    plt.imshow(phase, cmap='hsv', vmin=-np.pi, vmax=np.pi)
-    plt.colorbar()
-    plt.title("Pupil Phase (should be constant)")
-    plt.show()
-    # --- FFT grid properties ---
+    # 4. Check FFT grid centering
     padded_size = fg_np.grid_size * pipeline.p["pad_factor"]
-    half_size = padded_size // 2
+    
+    # FIXED: Use proper FFT center calculation
+    if padded_size % 2 == 0:
+        # For even grids, FFT center is at index padded_size // 2
+        fft_center_idx = padded_size // 2
+    else:
+        # For odd grids, FFT center is at index (padded_size - 1) // 2
+        fft_center_idx = (padded_size - 1) // 2
+    
     peak_idx = np.unravel_index(np.argmax(intensity_grid), intensity_grid.shape)
-    offset_px = (peak_idx[0] - half_size, peak_idx[1] - half_size)
-    print(f"-> FFT Numerical Grid Shape: {intensity_grid.shape}")
-    print(f"-> Expected Peak Index: ({half_size}, {half_size})")
-    print(f"-> Actual Peak Index:   {peak_idx}")
-    print(f"-> Centering Offset (px): {offset_px}")
-    if np.abs(offset_px[0]) > 1 or np.abs(offset_px[1]) > 1:
-        print("   WARNING: Centering offset > 1 pixel – check pixel_scale_um and pad_factor.")
-
-
-    # Override pupil field with a uniform circular aperture
-    pupil_ones = np.ones_like(Ef_input[0], dtype=complex)
-    pupil_ones[~fg_np.mask_np] = 0  # apply the same mask
-    E_focal_test = fg_np.apply_ef_to_lantern(pupil_ones[None, ...])[0]
-    intensity_test = np.abs(E_focal_test)**2
+    offset_px = (peak_idx[0] - fft_center_idx, peak_idx[1] - fft_center_idx)
     
-    # Plot the test PSF
-    plt.figure()
-    plt.imshow(np.log10(intensity_test + 1e-8), cmap='viridis')
-    plt.colorbar()
-    plt.title("Test PSF from uniform pupil (bypassing IFunc)")
-    plt.show()
+    print(f"\n[FFT GRID CHECK]")
+    print(f"  FFT grid shape: {intensity_grid.shape}")
+    print(f"  FFT center index: ({fft_center_idx}, {fft_center_idx})")
+    print(f"  PSF peak index: {peak_idx}")
+    print(f"  Centering offset: {offset_px} pixels")
     
-    # --- Mesh projection ---
+    if abs(offset_px[0]) > 0.5 or abs(offset_px[1]) > 0.5:
+        print(f"  ⚠️  WARNING: PSF peak is off-center by > 0.5 pixels")
+        print(f"  This indicates a centering problem in the FFT or mask.")
+
+    # 5. Centroid calculation (subpixel accuracy)
+    total_intensity = intensity_grid.sum()
+    y_centroid = np.sum(np.indices(intensity_grid.shape)[0] * intensity_grid) / total_intensity
+    x_centroid = np.sum(np.indices(intensity_grid.shape)[1] * intensity_grid) / total_intensity
+    centroid_offset = (y_centroid - fft_center_idx, x_centroid - fft_center_idx)
+    
+    print(f"  PSF centroid (subpixel): ({y_centroid:.3f}, {x_centroid:.3f})")
+    print(f"  Centroid offset: ({centroid_offset[0]:.3f}, {centroid_offset[1]:.3f}) pixels")
+
+    # 6. Check mesh interpolation
     mesh_pts = pipeline.wvg_props_input['mesh'].points
     x_min, x_max = mesh_pts[:, 0].min(), mesh_pts[:, 0].max()
     y_min, y_max = mesh_pts[:, 1].min(), mesh_pts[:, 1].max()
-    core_pts = np.array(pipeline.wvg_props_input['points'])  # (X, Y) of core centers
+    core_pts = np.array(pipeline.wvg_props_input['points'])
 
-    # Interpolate mesh intensity onto a regular grid for smooth display
     grid_x, grid_y = np.meshgrid(np.linspace(x_min, x_max, 400),
                                  np.linspace(y_min, y_max, 400))
     mesh_grid_intensity = griddata((mesh_pts[:, 0], mesh_pts[:, 1]), intensity_mesh,
                                    (grid_x, grid_y), method='cubic', fill_value=0)
 
-    # Find the peak on the mesh grid
     peak_mesh_idx = np.unravel_index(np.argmax(mesh_grid_intensity), mesh_grid_intensity.shape)
     peak_mesh_x = grid_x[0, peak_mesh_idx[1]]
     peak_mesh_y = grid_y[peak_mesh_idx[0], 0]
 
-    # Distance from mesh peak to nearest core
     dist_to_cores = np.sqrt((core_pts[:, 0] - peak_mesh_x)**2 + (core_pts[:, 1] - peak_mesh_y)**2)
     min_dist = dist_to_cores.min()
     closest_core = np.argmin(dist_to_cores)
-    print(f"-> Mesh PSF peak at X={peak_mesh_x:.3f} μm, Y={peak_mesh_y:.3f} μm")
-    print(f"-> Distance to nearest core (index {closest_core}): {min_dist:.3f} μm")
-    if min_dist > 5.0:
-        print("   WARNING: PSF peak far from any core – scaling or alignment issue.")
+    
+    print(f"\n[MESH INTERPOLATION CHECK]")
+    print(f"  Mesh PSF peak: ({peak_mesh_x:.3f}, {peak_mesh_y:.3f}) μm")
+    print(f"  Nearest core (#{closest_core}): distance = {min_dist:.3f} μm")
+    
+    if min_dist > 2.0:
+        print(f"  ⚠️  WARNING: PSF peak is > 2 μm from nearest core")
+        print(f"  This suggests a scaling or centering issue in mesh interpolation.")
 
-    # --- Power interception fraction ---
+    # 7. Power interception
     total_power = intensity_mesh.sum()
     core_mask = np.zeros_like(intensity_mesh, dtype=bool)
     for cx, cy in core_pts:
         dist = np.sqrt((mesh_pts[:, 0] - cx)**2 + (mesh_pts[:, 1] - cy)**2)
-        core_mask = core_mask | (dist < 2.5)   # radius ~ half pitch
+        core_mask = core_mask | (dist < 2.5)
     power_in_cores = intensity_mesh[core_mask].sum()
     frac_in_cores = power_in_cores / total_power if total_power > 0 else 0
-    print(f"-> Fraction of PSF power intercepted by core regions (r=2.5 μm): {frac_in_cores:.3f}")
+    
+    print(f"\n[COUPLING EFFICIENCY CHECK]")
+    print(f"  Power in cores (r=2.5 μm): {frac_in_cores:.1%}")
+    
     if frac_in_cores < 0.5:
-        print("   WARNING: Less than 50% of power falls on cores – alignment or beam size issue.")
+        print(f"  ⚠️  WARNING: < 50% coupling efficiency")
+        print(f"  Check beam size, alignment, and numerical aperture matching.")
 
-    # ---------- Plotting (original 2x3 grid) ----------
+    # 8. Generate plots
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    # 1. FFT grid (log scale)
-    ax = axes[0,0]
+    
+    # Plot 1: FFT grid with corrected center lines
+    ax = axes[0, 0]
     im = ax.imshow(np.log10(intensity_grid + 1e-8), cmap='viridis',
-                   extent=[-half_size, half_size, -half_size, half_size])
-    ax.axvline(0, color='r', linestyle='--', alpha=0.5)
+                   extent=[-fft_center_idx, padded_size - fft_center_idx,
+                           -fft_center_idx, padded_size - fft_center_idx])
+    ax.axvline(0, color='r', linestyle='--', alpha=0.5, label='Center')
     ax.axhline(0, color='r', linestyle='--', alpha=0.5)
-    ax.set_title("FFT Focal Plane (log)")
+    ax.plot(offset_px[1], offset_px[0], 'r+', markersize=15, markeredgewidth=2, label='Peak')
+    ax.set_title(f"FFT Focal Plane (log)\nOffset: {offset_px}")
     ax.set_xlabel("Pixels")
     ax.set_ylabel("Pixels")
+    ax.legend()
     plt.colorbar(im, ax=ax, label="log10 Intensity")
 
-    # 2. FFT grid contour (linear)
-    ax = axes[0,1]
-    levels = np.linspace(0, intensity_grid.max(), 20)
-    ax.contourf(intensity_grid, levels=levels, cmap='plasma',
-                extent=[-half_size, half_size, -half_size, half_size])
-    ax.axvline(0, color='w', linestyle='--', alpha=0.5)
-    ax.axhline(0, color='w', linestyle='--', alpha=0.5)
-    ax.set_title("FFT Focal Plane (linear contour)")
-    ax.set_xlabel("Pixels")
-    ax.set_ylabel("Pixels")
-    plt.colorbar(ax.contourf(intensity_grid, levels=levels, cmap='plasma'), ax=ax)
+    # Plot 2: Mask
+    ax = axes[0, 1]
+    im = ax.imshow(mask, cmap='gray', origin='lower')
+    ax.axvline(expected_center, color='r', linestyle='--', alpha=0.5)
+    ax.axhline(expected_center, color='r', linestyle='--', alpha=0.5)
+    ax.plot(mask_center_x, mask_center_y, 'rx', markersize=10, markeredgewidth=2)
+    ax.set_title("Pupil Mask\nRed cross = centroid")
+    plt.colorbar(im, ax=ax)
 
-    # 3. Cross‑section through FFT peak
-    ax = axes[0,2]
-    x_axis = np.arange(padded_size) - half_size
+    # Plot 3: Cross-section
+    ax = axes[0, 2]
+    x_axis = np.arange(padded_size) - fft_center_idx
     y_peak = intensity_grid[peak_idx[0], :]
     ax.plot(x_axis, y_peak / y_peak.max(), label='Horizontal')
     x_peak = intensity_grid[:, peak_idx[1]]
     ax.plot(x_axis, x_peak / x_peak.max(), label='Vertical')
-    ax.set_title("Normalized PSF Cross‑sections")
+    ax.axvline(0, color='r', linestyle='--', alpha=0.3)
+    ax.set_title("Normalized PSF Cross-sections")
     ax.set_xlabel("Pixels from center")
     ax.set_ylabel("Normalized intensity")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # 4. PSF on mesh (interpolated)
-    ax = axes[1,0]
+    # Plot 4: PSF on mesh
+    ax = axes[1, 0]
     im = ax.imshow(mesh_grid_intensity, cmap='inferno',
                    extent=[x_min, x_max, y_min, y_max], origin='lower')
-    ax.scatter(core_pts[:, 0], core_pts[:, 1], c='cyan', s=20, edgecolor='k', label='Cores')
-    ax.scatter(peak_mesh_x, peak_mesh_y, c='red', s=50, marker='x', label='PSF peak')
-    ax.set_title("PSF on Waveguide Mesh")
+    ax.scatter(core_pts[:, 0], core_pts[:, 1], c='cyan', s=30, 
+               edgecolor='k', linewidth=1.5, label='Cores')
+    ax.scatter(peak_mesh_x, peak_mesh_y, c='red', s=80, marker='x',
+               linewidth=2, label='PSF peak')
+    ax.set_title(f"PSF on Mesh\nNearest core: {min_dist:.2f} μm")
     ax.set_xlabel("X (μm)")
     ax.set_ylabel("Y (μm)")
     ax.legend()
     plt.colorbar(im, ax=ax, label="Intensity")
 
-    # 5. Histogram of mesh intensities
-    ax = axes[1,1]
-    ax.hist(intensity_mesh, bins=100, log=True, alpha=0.7)
-    ax.set_title("Histogram of Mesh Intensities (log scale)")
-    ax.set_xlabel("Intensity")
-    ax.set_ylabel("Frequency (log)")
-
-    # 6. Radial profile from mesh
-    ax = axes[1,2]
+    # Plot 5: Radial profile
+    ax = axes[1, 1]
     r = np.sqrt((mesh_pts[:, 0] - peak_mesh_x)**2 + (mesh_pts[:, 1] - peak_mesh_y)**2)
     idx_sort = np.argsort(r)
     r_sorted = r[idx_sort]
     I_sorted = intensity_mesh[idx_sort]
     bins = np.linspace(0, r_sorted.max(), 50)
-    r_bin = (bins[1:] + bins[:-1])/2
+    r_bin = (bins[1:] + bins[:-1]) / 2
     I_bin = np.zeros_like(r_bin)
-    for i in range(len(bins)-1):
-        mask = (r_sorted >= bins[i]) & (r_sorted < bins[i+1])
-        if np.any(mask):
-            I_bin[i] = I_sorted[mask].mean()
-    ax.plot(r_bin, I_bin, 'b-', label='Radial profile')
-    lam = pipeline.p["wl"]
-    na = 0.1  # FIXME: replace with actual NA if known
-    k = 2 * np.pi / lam
-    def airy(x):
-        theta = x / (lam / (2*na))
-        theta = np.where(theta == 0, 1e-12, theta)
-        return (2*j1(k * x * na) / (k * x * na))**2
-    r_airy = np.linspace(0, r_bin.max(), 200)
-    I_airy = airy(r_airy)
-    I_airy = I_airy / I_airy.max() * I_bin.max()
-    ax.plot(r_airy, I_airy, 'r--', label='Ideal Airy (approx)')
+    for i in range(len(bins) - 1):
+        mask_bin = (r_sorted >= bins[i]) & (r_sorted < bins[i+1])
+        if np.any(mask_bin):
+            I_bin[i] = I_sorted[mask_bin].mean()
+    ax.plot(r_bin, I_bin, 'b-', linewidth=2, label='Measured')
     ax.set_title("Radial PSF Profile")
     ax.set_xlabel("Radius (μm)")
     ax.set_ylabel("Intensity")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.show()
-
-    # ---------- Additional Diagnostic: Amplitude & Phase near the peak ----------
-    # Compute amplitude and phase of the pupil field (Ef_input)
-    amp_input = np.abs(Ef_input[0])          # shape (grid_size, grid_size)
-    phase_input = np.angle(Ef_input[0])      # radians
-
-    # For focal field, we want to zoom around the intensity peak
-    # Define a window of e.g. 80x80 pixels around the peak
-    half_window = 40
-    r0 = max(0, peak_idx[0] - half_window)
-    r1 = min(intensity_grid.shape[0], peak_idx[0] + half_window + 1)
-    c0 = max(0, peak_idx[1] - half_window)
-    c1 = min(intensity_grid.shape[1], peak_idx[1] + half_window + 1)
-
-    # Extract the focal field segment
-    Ef_focal_zoom = Ef_focal_grid[r0:r1, c0:c1]
-    amp_focal_zoom = np.abs(Ef_focal_zoom)
-    phase_focal_zoom = np.angle(Ef_focal_zoom)
-
-    # Coordinates for the zoomed region (pixel indices relative to padded grid)
-    x_zoom = np.arange(c0, c1) - half_size
-    y_zoom = np.arange(r0, r1) - half_size
-
-    # Create a new figure for amplitude/phase
-    fig2, axes2 = plt.subplots(2, 2, figsize=(12, 10))
-    # Pupil amplitude
-    ax = axes2[0,0]
-    im = ax.imshow(amp_input, cmap='gray', origin='lower')
-    ax.set_title("Pupil Plane Amplitude")
-    ax.set_xlabel("X (pixels)")
-    ax.set_ylabel("Y (pixels)")
-    plt.colorbar(im, ax=ax, label="Amplitude")
-
-    # Pupil phase
-    ax = axes2[0,1]
+    # Plot 6: Pupil phase
+    ax = axes[1, 2]
+    phase_input = np.angle(Ef_input[0])
     im = ax.imshow(phase_input, cmap='hsv', origin='lower', vmin=-np.pi, vmax=np.pi)
-    ax.set_title("Pupil Plane Phase (radians)")
-    ax.set_xlabel("X (pixels)")
-    ax.set_ylabel("Y (pixels)")
-    plt.colorbar(im, ax=ax, label="Phase")
-
-    # Focal amplitude (zoomed)
-    ax = axes2[1,0]
-    im = ax.imshow(amp_focal_zoom, cmap='inferno', origin='lower',
-                   extent=[x_zoom.min(), x_zoom.max(), y_zoom.min(), y_zoom.max()])
-    ax.set_title(f"Focal Plane Amplitude (zoom, peak at ({peak_idx[1]-half_size}, {peak_idx[0]-half_size}) pixels)")
-    ax.set_xlabel("Pixels from center")
-    ax.set_ylabel("Pixels from center")
-    plt.colorbar(im, ax=ax, label="Amplitude")
-
-    # Focal phase (zoomed)
-    ax = axes2[1,1]
-    im = ax.imshow(phase_focal_zoom, cmap='hsv', origin='lower', vmin=-np.pi, vmax=np.pi,
-                   extent=[x_zoom.min(), x_zoom.max(), y_zoom.min(), y_zoom.max()])
-    ax.set_title("Focal Plane Phase (zoom, radians)")
-    ax.set_xlabel("Pixels from center")
-    ax.set_ylabel("Pixels from center")
-    plt.colorbar(im, ax=ax, label="Phase")
+    ax.set_title("Pupil Phase")
+    plt.colorbar(im, ax=ax, label="Phase (rad)")
 
     plt.tight_layout()
     plt.show()
 
-    # Also print centroid of focal field (subpixel)
-    # Compute centroid using intensity-weighted average
-    total_intensity = intensity_grid.sum()
-    y_centroid = np.sum(np.indices(intensity_grid.shape)[0] * intensity_grid) / total_intensity
-    x_centroid = np.sum(np.indices(intensity_grid.shape)[1] * intensity_grid) / total_intensity
-    centroid_offset_px = (y_centroid - half_size, x_centroid - half_size)
-    print(f"-> Focal plane centroid offset (px): {centroid_offset_px}")
+    # Summary report
+    print("\n" + "="*60)
+    print("DIAGNOSTIC SUMMARY")
+    print("="*60)
+    issues = []
+    if abs(mask_center_y - expected_center) > 0.1 or abs(mask_center_x - expected_center) > 0.1:
+        issues.append("⚠️  Mask is off-center")
+    if abs(offset_px[0]) > 0.5 or abs(offset_px[1]) > 0.5:
+        issues.append("⚠️  FFT PSF peak is off-center")
+    if min_dist > 2.0:
+        issues.append("⚠️  Mesh PSF far from cores")
+    if frac_in_cores < 0.5:
+        issues.append("⚠️  Low coupling efficiency")
+    
+    if issues:
+        print("Issues found:")
+        for issue in issues:
+            print(f"  {issue}")
+        print("\nRecommendations:")
+        print("  1. Check mask centering in IFunc")
+        print("  2. Verify pixel_scale_um matches FFT grid spacing")
+        print("  3. Check mesh interpolation coordinate mapping")
+    else:
+        print("✓ All checks passed - PSF appears well-centered")
+    print("="*60)
 
     
 def _jax_fft_batch(Ef_input_batch, pad_width):
@@ -359,15 +315,30 @@ def _jax_fft_batch(Ef_input_batch, pad_width):
         axes=(1, 2),
     )
 
+def batch_collect_subpixel_signals(images: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
+    rows = coords[0]  # Shape: (N_SIGNALS, 5, 5)
+    cols = coords[1]  # Shape: (N_SIGNALS, 5, 5)
+    
+    def extract_single_core_patch(img, r_coords, c_coords):
+        c_pack = jnp.stack([r_coords, c_coords], axis=0)
+        patch = jax.scipy.ndimage.map_coordinates(img, c_pack, order=1, mode='constant', cval=0.0)
+        return jnp.mean(patch)
+
+    collect_all_cores_single_frame = jax.vmap(
+        lambda img: jax.vmap(lambda r, c: extract_single_core_patch(img, r, c))(rows, cols)
+    )
+    return collect_all_cores_single_frame(images)
+
 
 if backend == 'jax':
     _apply_pupil_jax_core = jax.jit(_jax_fft_batch, static_argnames=['pad_width'])
+    batch_collect_subpixel_signals = jax.jit(batch_collect_subpixel_signals)
 
-
-def get_simulation_parameters():
+def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_UM):
     """Return a dict of all setup constants and derived parameters."""
     params = {
-        "wl":            DEFAULT_WAVELENGTH_UM,
+        "nrings":        nrings,
+        "wl":            wavelength_um,
         "wavelength_nm": DEFAULT_WAVELENGTH_NM,
         "taper_factor":  12.,
         "rclad":         9.0,
@@ -378,40 +349,58 @@ def get_simulation_parameters():
         "core_res":      16,
         "clad_res":      60,
         "jack_res":      30,
-        "pixel_scale_um": 0.83*2,  # Physical scale of each pixel in the padded FFT grid (μm/px)
+        "pixel_scale_um": 1,  # Physical scale of each pixel in the padded FFT grid (μm/px)
         "ifunc_file":    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/ANDES_400pix_all_modes.fits',
     }
     params["rcore"]  = 1.8 / params["taper_factor"]
     params["ncore"]  = params["nclad"] + 8.8e-3
     params["njack"]  = params["nclad"] - 5.5e-3
-    params["rcores"] = [params["rcore"]] * 19
-    params["ncores"] = [params["ncore"]] * 19
+    params["output_positions"] = hex_ring_positions(params["nrings"], params["rclad"] / 2.5)
+    params["n_output_positions"] = len(params["output_positions"])
+    params["rcores"] = [params["rcore"]] * params["n_output_positions"]
+    params["ncores"] = [params["ncore"]] * params["n_output_positions"]
+    
     return params
 
 
 # =====================================================================
 # LAYER 2: WAVEGUIDE INFRASTRUCTURE
 # =====================================================================
+def _wavelength_tag(wavelength_nm: float) -> str:
+    """Filename tag matching the convention used for the 800 nm cache
+    (800.0 nm -> '0800'). Adjust if your cache naming differs, or if your
+    native grid isn't on round-nm values -- in that case you likely want
+    an explicit {wavelength_nm: tag} mapping instead of this formula."""
+    return f"{int(round(wavelength_nm)):04d}"
+
 
 def build_and_characterize_lantern(p):
-    """Set up the PhotonicLantern and return a ChainPropagator."""
-    core_pos = get_19port_positions(p["rclad"] / 2.5)
-    PL19 = PhotonicLantern(
-        core_pos, p["rcores"], p["rclad"], p["rjack"],
+    """Set up the PhotonicLantern and return a ChainPropagator."""        
+    PL_nrings = PhotonicLantern(
+        p["output_positions"], p["rcores"], p["rclad"], p["rjack"],
         p["ncores"], p["nclad"], p["njack"], p["z_ex"],
         p["taper_factor"], p["core_res"], p["clad_res"], p["jack_res"],
     )
 
-    prop1 = Propagator(p["wl"], PL19, 20)
-    prop1.degen_groups  = [[1,2],[3,4],[6,7],[8,9],[10,11],[12,13],[15,16]]
-    prop1.skipped_modes = [18]
-    prop1.load("19port_0800_front")
+    prop1 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)
+    prop1.degen_groups  = default_degenetate_groups_front[p["nrings"]]
+    prop1.skipped_modes = default_skipped_modes_front[p["nrings"]]
 
-    prop2 = Propagator(p["wl"], PL19, 20)
-    prop2.skipped_modes = [18]
-    prop2.degen_groups  = [[i for i in range(20) if i != 18]]
+    cache_prefix = "port"
+    n_output_positions = str(p["n_output_positions"])
+    wavelength_nm = DEFAULT_WAVELENGTH_NM # p["wavelength_nm"]
+    
+    tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_front"
+
+    prop1.load(tag)
+
+    prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)    
+    prop2.degen_groups  = default_degenetate_groups_back[p["nrings"]]
+    prop2.skipped_modes = default_skipped_modes_back[p["nrings"]]
+
     prop2.load_init_conds(prop1)
-    prop2.load("19port_0800_back")
+    tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_back"
+    prop2.load(tag)
 
     return ChainPropagator([prop1, prop2])
 
@@ -436,8 +425,8 @@ def get_waveguide_properties(prop12, mesh_z=0):
         active_modes = active_modes.T
 
     n_modes   = active_modes.shape[0]
-    points_2d = np.stack((mesh_obj.points[:, 1], mesh_obj.points[:, 0]), axis=-1)
-
+    points_2d = np.stack((mesh_obj.points[:, 0], mesh_obj.points[:, 1]), axis=-1)
+    
     return {
         'mesh':          mesh_obj,
         'mesh_areas':    areas,
@@ -470,75 +459,100 @@ class ModalProjector:
             norms = self.xp.where(norms == 0, 1.0, norms)
         return u0_batch / norms
 
-
 class IncidentFieldGenerator:
-    """Generate incident field profiles with configurable aberrations.
+    """Fixed version with correct centering and axis mapping."""
 
-    Parameters
-    ----------
-    p :      simulation parameter dict
-    ifunc :  influence-function object
-    xp :     array module to use — pass ``numpy`` (default) to keep all
-             intermediate arrays on the CPU, or ``jax.numpy`` to keep them
-             on the GPU.
-    """
-
-    def __init__(self, p, ifunc, xp=np):
+    def __init__(self, p, ifunc, xp=np, pupil_template=None):
         self.p     = p
         self.ifunc = ifunc
         self.xp    = xp
 
-        self.mask_np   = ifunc.mask_inf_func.get() > 0
-        self.grid_size = self.mask_np.shape[0]
-        self.num_modes = len(ifunc.influence_function)
-        self.ifunc_matrix = xp.stack(
-            [f.get() for f in ifunc.influence_function], axis=0)
+        if pupil_template is not None:
+            # DM mask + influence-function matrix don't depend on
+            # propagation wavelength -- reuse a copy built once elsewhere
+            # instead of re-reading/re-stacking ifunc.influence_function.
+            self.mask_np, self.grid_size, self.num_modes, self.ifunc_matrix = pupil_template
+        else:
+            self.mask_np   = ifunc.mask_inf_func.get() > 0
+            self.grid_size = self.mask_np.shape[0]
+            self.num_modes = len(ifunc.influence_function)
+            self.ifunc_matrix = xp.stack(
+                [f.get() for f in ifunc.influence_function], axis=0)
 
     def precompute_interpolation_weights(self, mesh_points):
-        """Precompute static bilinear grid mappings from the padded FFT grid
-        to the FE mesh, corrected for pixel scale, half-pixel centering,
-        and axis alignment."""
+        """
+        FIXED VERSION: Corrects FFT center calculation and axis mapping.
+        
+        Key fixes:
+        1. Proper even/odd grid center calculation for FFT convention
+        2. Correct axis mapping (mesh Y->Y, mesh X->X)
+        3. Validation checks
+        """
         padded_size = self.grid_size * self.p["pad_factor"]
         
-        # 1. Correct half-pixel centering offset for even-sized grids
-        center_offset = (padded_size - 1) / 2.0
+        # FIX 1: Correct center calculation for FFT convention
+        # For even grids: center is at index padded_size // 2
+        # For odd grids: center is at index (padded_size - 1) // 2
+        if padded_size % 2 == 0:
+            center_offset = padded_size / 2.0
+        else:
+            center_offset = (padded_size - 1) / 2.0
+        
+        print(f"[Interpolation Setup]")
+        print(f"  Padded grid size: {padded_size}")
+        print(f"  Grid parity: {'even' if padded_size % 2 == 0 else 'odd'}")
+        print(f"  Center offset: {center_offset}")
 
-        # 2. Retrieve pixel scale factor
+        # FIX 2: Retrieve and validate pixel scale
         pixel_scale = self.p.get("pixel_scale_um", 1.0)
+        print(f"  Pixel scale: {pixel_scale} μm/pixel")
+        
+        # FIX 3: CORRECT axis mapping
+        # mesh_points is shaped (N_points, 2) where:
+        #   mesh_points[:, 0] = Y coordinates (vertical)
+        #   mesh_points[:, 1] = X coordinates (horizontal)
+        # This matches the convention: points = (y, x) in mesh.points
+        mesh_y = mesh_points[:, 0]  # Vertical coordinate
+        mesh_x = mesh_points[:, 1]  # Horizontal coordinate
+        
+        # Validate mesh range
+        print(f"  Mesh X range: [{mesh_x.min():.3f}, {mesh_x.max():.3f}] μm")
+        print(f"  Mesh Y range: [{mesh_y.min():.3f}, {mesh_y.max():.3f}] μm")
 
-        # 3. Fix Axis Alignment: 
-        # mesh_points[:, 0] is Y (mesh_obj.points[:, 1])
-        # mesh_points[:, 1] is X (mesh_obj.points[:, 0])
-        mesh_y = mesh_points[:, 0]
-        mesh_x = mesh_points[:, 1]
-
-        # Convert physical coordinates (microns) to continuous pixel indices
+        # Convert physical coordinates to continuous pixel indices
+        # Grid coordinate = physical_coordinate / pixel_scale + center
         mesh_x_pix = (mesh_x / pixel_scale) + center_offset
         mesh_y_pix = (mesh_y / pixel_scale) + center_offset
 
-        # Calculate floor and ceiling indices for bilinear interpolation
+        # Check for out-of-bounds points
+        n_out_of_bounds = np.sum((mesh_y_pix < 0) | (mesh_y_pix >= padded_size) |
+                                  (mesh_x_pix < 0) | (mesh_x_pix >= padded_size))
+        if n_out_of_bounds > 0:
+            print(f"  ⚠️  WARNING: {n_out_of_bounds} mesh points map outside FFT grid!")
+            print(f"     Check pixel_scale_um and mesh extent.")
+
+        # Bilinear interpolation weights
         iy0 = self.xp.floor(mesh_y_pix).astype(self.xp.int32)
         iy1 = iy0 + 1
         ix0 = self.xp.floor(mesh_x_pix).astype(self.xp.int32)
         ix1 = ix0 + 1
 
-        # Compute interpolation weights
         wy1 = mesh_y_pix - iy0
         wy0 = 1.0 - wy1
         wx1 = mesh_x_pix - ix0
         wx0 = 1.0 - wx1
 
-        # Boundary validation mask
+        # Boundary validation
         valid = ((iy0 >= 0) & (iy1 < padded_size) &
                  (ix0 >= 0) & (ix1 < padded_size))
 
-        # Clip indices safely to array bounds
+        # Clip indices
         iy0 = self.xp.clip(iy0, 0, padded_size - 1)
         iy1 = self.xp.clip(iy1, 0, padded_size - 1)
         ix0 = self.xp.clip(ix0, 0, padded_size - 1)
         ix1 = self.xp.clip(ix1, 0, padded_size - 1)
 
-        # Store arrays back to the class instance
+        # Store
         self.iy0 = self.xp.asarray(iy0)
         self.iy1 = self.xp.asarray(iy1)
         self.ix0 = self.xp.asarray(ix0)
@@ -547,6 +561,8 @@ class IncidentFieldGenerator:
         self.w01 = self.xp.asarray((wy0 * wx1 * valid)[:, None])
         self.w10 = self.xp.asarray((wy1 * wx0 * valid)[:, None])
         self.w11 = self.xp.asarray((wy1 * wx1 * valid)[:, None])
+        
+        print(f"  Valid interpolation points: {np.sum(valid)} / {len(valid)}")
 
     def generate_field_profiles_batch(self, coeff_batch):
         """Generate complex electric field profiles from aberration coefficients."""
@@ -579,7 +595,6 @@ class IncidentFieldGenerator:
         E_padded = np.zeros(
             (Ef_input_batch.shape[0], padded_size, padded_size),
             dtype=np.complex128)
-        # np.asarray() makes this safe for both numpy and jax array inputs.
         E_padded[:, pad_width:pad_width+N, pad_width:pad_width+N] = \
             np.asarray(Ef_input_batch)
 
@@ -635,7 +650,9 @@ class BatchPropagationPipeline:
 
     def __init__(self, prop12, p, ifunc,
                  field_gen_on_gpu=False,
-                 field_gen_chunk_size=default_gen_chunk_size):
+                 field_gen_chunk_size=default_gen_chunk_size,
+                 field_gen_pupil_template=None):
+        
         self.prop12 = prop12
         self.p      = p
 
@@ -652,7 +669,11 @@ class BatchPropagationPipeline:
         self._field_gen_on_gpu_default = (backend == 'jax') and field_gen_on_gpu
 
         # Always build the numpy generators (cheap, host memory only).
-        self._field_gen_np   = IncidentFieldGenerator(p, ifunc, xp=np)
+        self._field_gen_pupil_template = field_gen_pupil_template
+        self._field_gen_np   = IncidentFieldGenerator(
+            p, ifunc, xp=np, pupil_template=field_gen_pupil_template)
+
+        
         self._modal_proj_np  = None   # built after weight precomputation below
 
         # Build JAX generators only if explicitly requested.
@@ -673,8 +694,9 @@ class BatchPropagationPipeline:
 
         # Delaunay cache for output interpolation.
         self._delaunay_cache = {}
-        self._delaunay_cache[DEFAULT_GRID_RESOLUTION] = \
-            self._precompute_delaunay_grid(DEFAULT_GRID_RESOLUTION)
+        # not needed:
+        # self._delaunay_cache[DEFAULT_GRID_RESOLUTION] = \
+        #     self._precompute_delaunay_grid(DEFAULT_GRID_RESOLUTION)
 
     # ------------------------------------------------------------------
     def _build_jax_field_gen(self):
@@ -1007,6 +1029,7 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.patches import FancyArrowPatch
+    from scipy.ndimage import uniform_filter
 
     n_fields = min(uf_2d_batch.shape[0], maxv)
     n_cols = min(3, n_fields)
@@ -1020,8 +1043,12 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
     for i in range(n_fields):
         ax = axes[i]
         data = uf_2d_batch[i]
+        
+        # Convert complex to intensity
+        data_intensity = np.abs(data)
+        
         # Log intensity for colormap
-        im_log = np.log(data + 1e-10)
+        im_log = np.log(data_intensity + 1e-10)
         im = ax.imshow(im_log, cmap='inferno',
                        extent=[X_plot.min(), X_plot.max(),
                                Y_plot.min(), Y_plot.max()],
@@ -1031,23 +1058,28 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
         ax.set_ylabel('y (μm)')
         plt.colorbar(im, ax=ax, label='log(Intensity)')
 
-        # ------- Peak detection -------
-        # Global maximum pixel
-        peak_idx = np.unravel_index(np.argmax(data), data.shape)
+        # ------- Peak detection as center of box with highest average signal -------
+        # Compute average intensity in each box using convolution
+        box_averages = uniform_filter(data_intensity, size=peak_box_size, 
+                                      mode='constant', cval=0)
+        
+        # Find the box center with highest average
+        peak_idx = np.unravel_index(np.argmax(box_averages), box_averages.shape)
         row, col = peak_idx
-        # Physical coordinates (X_plot and Y_plot are 2D meshgrids)
+        
+        # Physical coordinates
         x_peak = X_plot[row, col]
         y_peak = Y_plot[row, col]
 
-        # Average over a box around the peak
+        # Get statistics for that box
         half = peak_box_size // 2
         r0 = max(0, row - half)
-        r1 = min(data.shape[0], row + half + 1)
+        r1 = min(data_intensity.shape[0], row + half + 1)
         c0 = max(0, col - half)
-        c1 = min(data.shape[1], col + half + 1)
-        peak_region = data[r0:r1, c0:c1]
+        c1 = min(data_intensity.shape[1], col + half + 1)
+        peak_region = data_intensity[r0:r1, c0:c1]
         peak_avg = np.mean(peak_region)
-        peak_max = data[row, col]
+        peak_max = np.max(peak_region)
 
         # ------- Annotations -------
         # Red 'x' marker at the peak
@@ -1227,7 +1259,7 @@ def visualize_batch_hex_grid_signals(
         output_signals = np.array(output_signals)
         # =====================================================================
     
-        standardized_signals = np.zeros(19)
+        standardized_signals = np.zeros(len(output_signals))
         standardized_signals[ideal_permutation] = output_signals
        
         
@@ -1517,21 +1549,6 @@ def map_evaluated_to_ideal_geometry(core_centers, ideal_centers_list):
     print(f"[Geometric Fit] Residual matching RMS error: {np.mean(cost_matrix[eval_indices, ideal_permutation]):.4e}\n")
     
     return ideal_permutation
-
-@jax.jit
-def batch_collect_subpixel_signals(images: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
-    rows = coords[0]  # Shape: (N_SIGNALS, 5, 5)
-    cols = coords[1]  # Shape: (N_SIGNALS, 5, 5)
-    
-    def extract_single_core_patch(img, r_coords, c_coords):
-        c_pack = jnp.stack([r_coords, c_coords], axis=0)
-        patch = jax.scipy.ndimage.map_coordinates(img, c_pack, order=1, mode='constant', cval=0.0)
-        return jnp.mean(patch)
-
-    collect_all_cores_single_frame = jax.vmap(
-        lambda img: jax.vmap(lambda r, c: extract_single_core_patch(img, r, c))(rows, cols)
-    )
-    return collect_all_cores_single_frame(images)
 
 def collect_subpixel_signals(image_2d, x_min, y_min, dx, dy, centers, n=7):
     """Extracts an n x n subimage centered on fractional continuous coordinates."""

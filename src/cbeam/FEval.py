@@ -9,6 +9,13 @@ jl.seval("using Pkg")
 Pkg = jl.Pkg
 xp = get_xp()
 
+# ===== ADD THIS: Load the FEval Julia module =====
+_cbeam_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_feval_jl = os.path.join(_cbeam_root, "cbeam", "FEval", "src", "FEval.jl")
+jl.seval(f'include("{_feval_jl}")')
+# ================================================
+
+
 def create_tree(points,connections):
     return jl.FEval.construct_tritree(points, connections+1)
 
