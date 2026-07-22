@@ -1,5 +1,5 @@
 # =====================================================================
-# BATCH PROPAGATION PIPELINE - FIXED VERSION
+    # BATCH PROPAGATION PIPELINE - FIXED VERSION
 # =====================================================================
 # This version fixes the PSF centering issues identified in the analysis.
 #
@@ -55,7 +55,7 @@ L1 = 50000
 L2 = 50000
 
 DEFAULT_WAVELENGTH_UM   = 0.8
-DEFAULT_WAVELENGTH_NM   = 800.0
+DEFAULT_WAVELENGTH_NM   = 800
 DEFAULT_GRID_RESOLUTION = 400
 DEFAULT_SUBPIXEL_N      = 5
 N_SIGNALS = 19
@@ -336,14 +336,17 @@ if backend == 'jax':
 
 def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_UM):
     """Return a dict of all setup constants and derived parameters."""
+    wavelength_nm = wavelength_um * 1000.0
+    scaling_factor = wavelength_um / DEFAULT_WAVELENGTH_UM
+    scaling_factor = 1.0
     params = {
         "nrings":        nrings,
         "wl":            wavelength_um,
-        "wavelength_nm": DEFAULT_WAVELENGTH_NM,
+        "wavelength_nm": wavelength_nm,
         "taper_factor":  12.,
-        "rclad":         9.0,
-        "rjack":         27,
-        "z_ex":          L1 + L2,
+        "rclad":         9.0*scaling_factor,
+        "rjack":         27*scaling_factor,
+        "z_ex":          L1*scaling_factor + L2*scaling_factor,
         "nclad":         1.444,
         "pad_factor":    4,
         "core_res":      16,
@@ -352,7 +355,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
         "pixel_scale_um": 1,  # Physical scale of each pixel in the padded FFT grid (μm/px)
         "ifunc_file":    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/ANDES_400pix_all_modes.fits',
     }
-    params["rcore"]  = 1.8 / params["taper_factor"]
+    params["rcore"]  = (1.8 * scaling_factor) / params["taper_factor"]
     params["ncore"]  = params["nclad"] + 8.8e-3
     params["njack"]  = params["nclad"] - 5.5e-3
     params["output_positions"] = hex_ring_positions(params["nrings"], params["rclad"] / 2.5)
@@ -388,9 +391,11 @@ def build_and_characterize_lantern(p):
 
     cache_prefix = "port"
     n_output_positions = str(p["n_output_positions"])
-    wavelength_nm = DEFAULT_WAVELENGTH_NM # p["wavelength_nm"]
+    wavelength_nm = p["wavelength_nm"]
     
     tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_front"
+    
+    #prop1.characterize(0,L1*1.75,save=True,tag=tag)
 
     prop1.load(tag)
 
@@ -400,6 +405,9 @@ def build_and_characterize_lantern(p):
 
     prop2.load_init_conds(prop1)
     tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_back"
+
+    # prop2.characterize(L1*1.75,L1*1.75+L2*1.75,save=True,tag=tag)
+
     prop2.load(tag)
 
     return ChainPropagator([prop1, prop2])
