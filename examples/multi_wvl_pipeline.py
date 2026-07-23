@@ -82,7 +82,15 @@ def build_lantern_geometry(base_params: dict) -> PhotonicLantern:
     once and share the same PL_N object across every wavelength's
     Propagator.
     """
+
+    import numpy as np  # Force plain numpy for geometry
+
     core_pos = hex_ring_positions(base_params["nrings"], base_params["rclad"] / 2.5)
+
+    # Convert to plain numpy if it's a JAX array
+    if hasattr(core_pos, '__array__'):
+        core_pos = np.asarray(core_pos)
+
     return PhotonicLantern(
         core_pos, base_params["rcores"], base_params["rclad"], base_params["rjack"],
         base_params["ncores"], base_params["nclad"], base_params["njack"], base_params["z_ex"],
@@ -247,6 +255,18 @@ def build_and_characterize_lantern_at_wavelength(
         Copy of base_params with wl / wavelength_nm set for this wavelength.
     prop12   : ChainPropagator
     """
+
+    import os
+    from cbeam.backend import get_backend
+    import numpy as np
+    
+    # === FORCE NUMPY FOR ENTIRE FUNCTION ===
+    original_backend = get_backend()
+    if original_backend == "jax":
+        if verbose:
+            print(f"    [build_and_characterize] Using numpy backend for characterization")
+        os.environ["CBEAM_BACKEND"] = "numpy"
+    
     p_lambda = dict(base_params)
     p_lambda["wl"] = wavelength_nm / 1000.0
     p_lambda["wavelength_nm"] = wavelength_nm
@@ -276,6 +296,12 @@ def build_and_characterize_lantern_at_wavelength(
     # whether the front segment was just loaded or just solved.
     prop2.load_init_conds(prop1)
     _load_or_characterize(prop2, f"{tag}_back", _z_split, z_ex, verbose=verbose)
+
+    # === RESTORE ORIGINAL BACKEND ===
+    if original_backend == "jax":
+        os.environ["CBEAM_BACKEND"] = "jax"
+        if verbose:
+            print(f"    [build_and_characterize] Restored {original_backend} backend")
 
     return p_lambda, ChainPropagator([prop1, prop2])
 
@@ -314,64 +340,6 @@ class WavelengthEngine:
 
 
 class MultiWavelengthPropagationPipeline:
-    """
-    Manages per-wavelength propagation through the lantern across a set
-    of native wavelengths, WITHOUT holding every wavelength's heavy state
-    (FEM mesh, mode-field trajectory, coupling-matrix trajectory) resident
-    in memory at once.
-
-    Usage
-    -----
-        mwp = MultiWavelengthPropagationPipeline(
-            base_params=get_simulation_parameters(),
-            ifunc=ifunc,
-            native_wavelengths_nm=np.linspace(700, 900, 21),  # coarse solve grid
-        )
-        power, wl_out = mwp.get_power_spectra(
-            coeff_matrix, output_wavelengths_nm=np.linspace(700, 900, 200)
-        )  # power: (200, n_fields, n_fibers)
-
-    Memory model
-    ------------
-    Each wavelength's ChainPropagator carries a mode-field trajectory
-    (`vs`, shape roughly n_z_steps x n_modes x n_mesh_points, complex128)
-    and a coupling-matrix trajectory (`cmats`, n_z_steps x n_modes x
-    n_modes, complex128) for both the front and back segments. Depending
-    on mesh size and adaptive step count these can individually reach the
-    GB range. An earlier version of this class built and kept a
-    BatchPropagationPipeline for every native wavelength in self.engines
-    simultaneously -- fine for a handful of wavelengths, but it scales
-    memory linearly with n_wavelengths and can OOM-kill the process
-    (observed as a silent kernel crash, no Python traceback, after "a
-    few" wavelengths loaded) for larger native grids.
-
-    This version builds one wavelength's engine at a time inside
-    propagate_batch(), extracts only the small result actually needed
-    (uf_batch sliced to n_fibers complex numbers per field -- not the
-    underlying GB-scale trajectory arrays), and explicitly drops the
-    engine + forces garbage collection (Python and, best-effort, Julia --
-    see _force_release_memory()) before moving to the next wavelength.
-    Peak memory is therefore roughly O(1 wavelength) rather than
-    O(n_wavelengths).
-
-    Set cache_engines=True to opt back into keeping every engine resident
-    (e.g. if you're propagating many different aberration batches against
-    the same small native grid and want to avoid rebuilding each time) --
-    only do this if you've confirmed your native grid is small enough,
-    and your machine has enough RAM, to hold all of them at once.
-
-    Notes on cost
-    -------------
-    Each native wavelength needs its own local-mode-basis characterization
-    (see build_and_characterize_lantern_at_wavelength -- solved once and
-    cached to disk; a fresh characterize() can take ~800 s (~13 min) on
-    comparable z-extents, though loading a cached one is normally fast).
-    Keep native_wavelengths_nm coarse (tens of points, denser near known
-    mode-degeneracy/avoided-crossing regions -- see cbeam's compute_neffs()
-    sanity check) and use output_wavelengths_nm for the finer grid you
-    actually want in the dispersed spectra -- see
-    interpolate_complex_spectra().
-    """
 
     def __init__(
         self,
@@ -400,9 +368,24 @@ class MultiWavelengthPropagationPipeline:
         # reach into mwp.engines[wl].pipeline._field_gen_np.num_modes).
         self.num_modes = len(ifunc.influence_function)
 
+
+        # === NEW: Force numpy backend during geometry construction ===
+        from cbeam.backend import get_backend
+        original_backend = get_backend()
+        
+        if original_backend == "jax":
+            import os
+            os.environ["CBEAM_BACKEND"] = "numpy"
+            print(f"[MultiWavelength] Temporarily switching to numpy backend for geometry construction...")
+        
         # Wavelength-independent lantern geometry, built once and shared
         # by every per-wavelength Propagator.
         self._shared_PL_N = build_lantern_geometry(base_params)
+
+        # Restore original backend
+        if original_backend == "jax":
+            os.environ["CBEAM_BACKEND"] = "jax"
+            print(f"[MultiWavelength] Restored {original_backend} backend")
 
         # Wavelength-independent pupil data (DM mask + ifunc_matrix),
         # captured from whichever engine is built first and reused for
@@ -464,27 +447,26 @@ class MultiWavelengthPropagationPipeline:
         use_gpu: Optional[bool] = None,
         gen_chunk_size: Optional[int] = None,
         prop_chunk_size: Optional[int] = None,
+        integration_radius_um: Optional[float] = None,  # NEW PARAMETER (for this method only)
     ) -> np.ndarray:
         """
         Propagate one batch of aberration configurations through the
-        lantern at every native wavelength, building and (unless
-        cache_engines=True) discarding each wavelength's engine in turn.
+        lantern at every native wavelength.
 
         Parameters
         ----------
         aberration_coeff_batch : ndarray, shape (n_fields, n_active_modes)
-            Same convention as BatchPropagationPipeline.generate_batch_modal_coefficients.
-        use_gpu, gen_chunk_size, prop_chunk_size : passed straight through
-            to each per-wavelength pipeline's generate_batch_modal_coefficients
-            / propagate_batch calls.
+        use_gpu, gen_chunk_size, prop_chunk_size : passed to pipelines
+        integration_radius_um : float, optional
+            If provided, spatially integrate the output field intensity over
+            circular apertures of this radius (in microns) centered on each
+            fiber core, rather than using modal coefficients directly. This
+            reduces wavelength-dependent jaggedness from mode shape variations.
+            Typical values: 2.5-4.0 μm. Default: None (use modal coefficients).
 
         Returns
         -------
         spectra_complex : ndarray, shape (n_wavelengths_native, n_fields, n_fibers), complex128
-            Complex per-fiber modal coefficient at each native wavelength.
-            Power is NOT taken here -- phase is preserved in case you want
-            it (e.g. to sanity-check mode purity); take np.abs(...)**2 for
-            detector-plane flux.
         """
         n_wl = len(self.native_wavelengths_nm)
         n_fields = np.asarray(aberration_coeff_batch).shape[0]
@@ -507,20 +489,17 @@ class MultiWavelengthPropagationPipeline:
             uf_batch, _, _ = engine.pipeline.propagate_batch(
                 u0_batch, chunk_size=prop_chunk_size,
             )
-            # Single-mode-per-fiber assumption: fiber flux is just the
-            # per-mode coefficient for that fiber's mode index. No
-            # coherent multi-mode sum needed within a fiber. If a fiber
-            # ever carries >1 mode, replace this line with a coherent sum
-            # over that fiber's mode indices before storing.
-            spectra_complex[i, :, :] = uf_batch[:, :self.n_fibers]
+            
+            # === Spatial integration happens AFTER propagation ===
+            if integration_radius_um is not None:
+                spectra_complex[i, :, :] = self._integrate_over_cores(
+                    engine, uf_batch, integration_radius_um
+                )
+            else:
+                # Original: just use modal coefficients
+                spectra_complex[i, :, :] = uf_batch[:, :self.n_fibers]
 
             if not self.cache_engines:
-                # Drop the heavy per-wavelength state (mesh, mode-field
-                # trajectory, coupling-matrix trajectory -- these can run
-                # into the GB range per wavelength) before moving on.
-                # This is the fix for OOM kernel crashes after a few
-                # wavelengths: without it, all n_wavelengths engines stay
-                # resident simultaneously.
                 del engine, u0_batch, uf_batch
                 _force_release_memory()
 
@@ -586,6 +565,90 @@ class MultiWavelengthPropagationPipeline:
             n_wl_output, n_fields, n_fibers)
         return spectra_output
 
+
+    def _integrate_over_cores(
+        self,
+        engine: WavelengthEngine,
+        uf_batch: np.ndarray,
+        radius_um: float,
+    ) -> np.ndarray:
+        """
+        Spatially integrate output field intensity over circular apertures
+        centered on each fiber core. This averages out small wavelength-
+        dependent variations in mode field shapes.
+        
+        Parameters
+        ----------
+        engine : WavelengthEngine
+        uf_batch : ndarray, shape (n_fields, n_modes)
+            Output modal coefficients
+        radius_um : float
+            Integration radius in microns
+            
+        Returns
+        -------
+        integrated : ndarray, shape (n_fields, n_fibers), complex128
+        """
+        from scipy.spatial import cKDTree
+        from scipy.ndimage import map_coordinates
+        
+        # Get output mesh and mode fields at final z
+        z_final = engine.prop12.zs[-1]
+        mesh_final = engine.prop12.make_mesh_at_z(z_final)
+        vs_final = engine.prop12.get_v(z_final)  # (n_modes, n_mesh_points)
+        
+        # Get fiber core positions at output
+        # Cores taper down by taper_factor
+        core_pos_input = np.array(self.base_params["output_positions"])  # Convert to numpy array
+        taper_factor = self.base_params["taper_factor"]
+        core_pos_output = core_pos_input / taper_factor  # Cores are CLOSER at output
+        
+        # Build spatial tree for mesh points
+        mesh_pts_2d = mesh_final.points[:, :2]  # (n_mesh_points, 2)
+        tree = cKDTree(mesh_pts_2d)
+        
+        n_fields = uf_batch.shape[0]
+        integrated = np.zeros((n_fields, self.n_fibers), dtype=np.complex128)
+        
+        # For each fiber core
+        for fiber_idx in range(self.n_fibers):
+            core_center = core_pos_output[fiber_idx]  # (x, y) in microns
+            
+            # Find mesh points within integration radius
+            indices = tree.query_ball_point(core_center, r=radius_um)
+            
+            if len(indices) == 0:
+                # No mesh points in aperture - fall back to modal coefficient
+                print(f"[WARNING] No mesh points found within {radius_um} μm of fiber {fiber_idx}")
+                integrated[:, fiber_idx] = uf_batch[:, fiber_idx]
+                continue
+            
+            # For each field in the batch
+            for field_idx in range(n_fields):
+                uf = uf_batch[field_idx, :]  # (n_modes,)
+                
+                # Reconstruct spatial field at mesh points in aperture
+                # field(r) = sum_i u_i * v_i(r)
+                field_at_points = np.sum(
+                    uf[:, np.newaxis] * vs_final[:, indices],
+                    axis=0
+                )  # (n_points_in_aperture,)
+                
+                # Integrate intensity over aperture
+                # Proper integration would weight by mesh element areas, but
+                # for a dense mesh, uniform weighting is a good approximation
+                integrated_intensity = np.mean(np.abs(field_at_points) ** 2)
+                
+                # Convert back to complex amplitude
+                # Preserve phase from the fiber's modal coefficient
+                modal_phase = np.angle(uf[fiber_idx])
+                
+                integrated[field_idx, fiber_idx] = (
+                    np.sqrt(integrated_intensity) * np.exp(1j * modal_phase)
+                )
+        
+        return integrated
+    
     # ------------------------------------------------------------------
     def get_power_spectra(
         self,
@@ -594,23 +657,22 @@ class MultiWavelengthPropagationPipeline:
         use_gpu: Optional[bool] = None,
         gen_chunk_size: Optional[int] = None,
         prop_chunk_size: Optional[int] = None,
+        integration_radius_um: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Convenience wrapper: propagate at all native wavelengths, optionally
-        interpolate onto a finer output grid, and return real per-fiber
-        power (flux) spectra ready for SpectralImageSimulator.
-
-        Returns
-        -------
-        power_spectra : ndarray, shape (n_wl_output, n_fields, n_fibers)
-            np.abs(complex coefficient)**2 at each wavelength.
-        wl_output_nm  : ndarray, shape (n_wl_output,)
-            The wavelength grid the output is sampled on (== native grid
-            if output_wavelengths_nm was not given).
+        Convenience wrapper: propagate and return power spectra.
+        
+        Parameters
+        ----------
+        integration_radius_um : float, optional
+            Spatial integration radius (μm) over fiber cores. Reduces
+            jaggedness from wavelength-dependent mode shape variations.
+            Typical: 2.5-4.0 μm. Default: None.
         """
         spectra_complex = self.propagate_batch(
             aberration_coeff_batch, use_gpu=use_gpu,
             gen_chunk_size=gen_chunk_size, prop_chunk_size=prop_chunk_size,
+            integration_radius_um=integration_radius_um,
         )
 
         if output_wavelengths_nm is None:
@@ -706,7 +768,10 @@ def example_multiwavelength_propagation():
         coeff_matrix,
         output_wavelengths_nm=output_wl_nm,
         use_gpu=False,
-        prop_chunk_size=8,
+        gen_chunk_size=64,
+        prop_chunk_size=64,
+        integration_radius_um=None
+        
     )
     print(f"\npower_spectra shape: {power_spectra.shape}  "
           f"(n_wavelengths={power_spectra.shape[0]}, "

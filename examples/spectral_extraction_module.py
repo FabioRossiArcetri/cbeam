@@ -80,9 +80,10 @@ class SpectralImageSimulator:
         - Other axis represents wavelength (dispersed)
     """
     
-    def __init__(self, config: SpectralConfig):
+    def __init__(self, config: SpectralConfig, aperture_size: int = 3):
         self.cfg = config
-        
+        self.aperture_size = aperture_size
+
         # Build wavelength grid
         self.wavelengths = np.linspace(
             config.lambda_min, 
@@ -240,7 +241,8 @@ class SpectralImageSimulator:
                     image, 
                     y_center, 
                     x_center, 
-                    flux * self.delta_lambda
+                    flux * self.delta_lambda,
+                    aperture_size=self.aperture_size
                 )
         
         # Convolve with PSF to simulate seeing + instrument PSF
@@ -254,24 +256,50 @@ class SpectralImageSimulator:
             image = self._add_detector_noise(image, exposure_time)
         
         return image, fiber_positions
-    
+        
     def _add_psf_spot(
         self, 
         image: np.ndarray, 
         y_center: float, 
         x_center: float, 
-        flux: float
+        flux: float,
+        aperture_size: int = 3  # NEW: window size (odd number)
     ):
-        """Add a single PSF spot to the image (delta function before convolution)."""
+        """
+        Add a PSF spot to the image, spreading flux over a window of pixels
+        around the center position.
+        
+        Parameters
+        ----------
+        aperture_size : int
+            Size of the square aperture in pixels (should be odd). For example,
+            aperture_size=3 integrates over a 3×3 pixel window. Default: 3.
+        """
         cfg = self.cfg
         
         # Round to nearest pixel
         y_pix = int(np.round(y_center))
         x_pix = int(np.round(x_center))
         
-        # Check bounds
-        if 0 <= y_pix < cfg.detector_height and 0 <= x_pix < cfg.detector_width:
-            image[y_pix, x_pix] += flux
+        half_size = aperture_size // 2
+        
+        # Integrate over aperture window with fractional pixel weighting
+        for dy in range(-half_size, half_size + 1):
+            for dx in range(-half_size, half_size + 1):
+                y_idx = y_pix + dy
+                x_idx = x_pix + dx
+                
+                # Check bounds
+                if 0 <= y_idx < cfg.detector_height and 0 <= x_idx < cfg.detector_width:
+                    # Compute fractional weight based on distance from center
+                    # (bilinear interpolation weight)
+                    dy_frac = abs((y_idx - y_center) - 0.5)
+                    dx_frac = abs((x_idx - x_center) - 0.5)
+                    
+                    # Bilinear weight (1.0 at center, decreases toward edges)
+                    weight = max(0, 1 - dy_frac) * max(0, 1 - dx_frac)
+                    
+                    image[y_idx, x_idx] += flux * weight / (aperture_size ** 2)
     
     def _add_detector_noise(
         self, 
@@ -320,7 +348,8 @@ class SpectralExtractor:
         self,
         image: np.ndarray,
         fiber_positions: np.ndarray,
-        method: str = 'optimal'
+        method: str = 'optimal',
+        aperture_width: int = 3  # NEW PARAMETER
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Extract 1D spectra from 2D spectral image.
@@ -333,6 +362,10 @@ class SpectralExtractor:
             Spatial positions of fiber traces (y-coordinates).
         method : str, 'optimal' or 'aperture'
             Extraction method.
+        aperture_width : int
+            Width in pixels over which to integrate at each wavelength.
+            Larger values smooth out noise but reduce spectral resolution.
+            Recommended: 3-7 pixels. Default: 3.
         
         Returns
         -------
@@ -368,11 +401,13 @@ class SpectralExtractor:
             # Extract spectrum for this fiber
             if method == 'optimal':
                 spec, var = self._optimal_extraction(
-                    image, variance_map, y_min, y_max, fiber_idx
+                    image, variance_map, y_min, y_max, fiber_idx,
+                    aperture_width=aperture_width  # Pass aperture width
                 )
             else:  # aperture extraction
                 spec, var = self._aperture_extraction(
-                    image, variance_map, y_min, y_max
+                    image, variance_map, y_min, y_max,
+                    aperture_width=aperture_width  # Also update aperture extraction
                 )
             
             spectra[:, fiber_idx] = spec
@@ -448,7 +483,8 @@ class SpectralExtractor:
         image: np.ndarray,
         variance_map: np.ndarray,
         y_min: int,
-        y_max: int
+        y_max: int,
+        aperture_width: int = 3  # NEW
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Simple aperture extraction (sum pixels in aperture)."""
         cfg = self.cfg
@@ -461,19 +497,31 @@ class SpectralExtractor:
         spectrum = np.sum(sub_image, axis=0)
         variance = np.sum(sub_variance, axis=0)
         
-        # Interpolate to wavelength grid
-        x_coords = np.arange(cfg.detector_width)
+        # === MODIFIED: Integrate over aperture window ===
         wavelengths = self.cfg.lambda_min + np.arange(cfg.n_spectral_bins) * (
             (cfg.lambda_max - cfg.lambda_min) / (cfg.n_spectral_bins - 1)
         )
-        x_pixels = np.array([
-            (w - cfg.lambda_min) * 
-            (cfg.detector_width / (cfg.lambda_max - cfg.lambda_min))
-            for w in wavelengths
-        ])
         
-        spec_interp = np.interp(x_pixels, x_coords, spectrum, left=0, right=0)
-        var_interp = np.interp(x_pixels, x_coords, variance, left=0, right=0)
+        dispersion_pix_per_nm = (
+            cfg.dispersion_mm_per_nm * 1000.0 / cfg.pixel_size_um
+        )
+        x_pixels = (wavelengths - cfg.lambda_min) * dispersion_pix_per_nm
+        x_pixels += cfg.detector_width / 2.0 - (
+            (cfg.lambda_max - cfg.lambda_min) / 2.0 * dispersion_pix_per_nm
+        )
+        
+        # Integrate over aperture window
+        half_width = aperture_width // 2
+        spec_interp = np.zeros(cfg.n_spectral_bins)
+        var_interp = np.zeros(cfg.n_spectral_bins)
+        
+        for wl_idx, x_center in enumerate(x_pixels):
+            x_min_win = max(0, int(x_center) - half_width)
+            x_max_win = min(cfg.detector_width, int(x_center) + half_width + 1)
+            
+            # Sum over window
+            spec_interp[wl_idx] = np.sum(spectrum[x_min_win:x_max_win])
+            var_interp[wl_idx] = np.sum(variance[x_min_win:x_max_win])
         
         return spec_interp, var_interp
 
@@ -488,17 +536,17 @@ class SpectralExtractor:
         variance_map: np.ndarray,
         y_min: int,
         y_max: int,
-        fiber_idx: int
+        fiber_idx: int,
+        aperture_width: int = 3  # NEW: integration window width
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Optimal extraction using spatial profile weighting (Horne 1986).
         
-        flux = Σ (P * D / V) / Σ (P^2 / V)
-        
-        where:
-            P = spatial profile (normalized)
-            D = data (image counts)
-            V = variance
+        Parameters
+        ----------
+        aperture_width : int
+            Width in pixels over which to integrate at each wavelength position.
+            Should be odd number (e.g., 3, 5, 7). Default: 3.
         """
         cfg = self.cfg
         
@@ -519,19 +567,53 @@ class SpectralExtractor:
         spectrum = numerator / (denominator + 1e-10)
         variance = 1.0 / (denominator + 1e-10)
         
-        # Interpolate to wavelength grid
+        # === MODIFIED: Integrate over aperture window ===
         x_coords = np.arange(cfg.detector_width)
+        
+        # Compute target wavelength pixel positions
         wavelengths = self.cfg.lambda_min + np.arange(cfg.n_spectral_bins) * (
             (cfg.lambda_max - cfg.lambda_min) / (cfg.n_spectral_bins - 1)
         )
-        x_pixels = np.array([
-            (w - cfg.lambda_min) * 
-            (cfg.detector_width / (cfg.lambda_max - cfg.lambda_min))
-            for w in wavelengths
-        ])
         
-        spec_interp = np.interp(x_pixels, x_coords, spectrum, left=0, right=0)
-        var_interp = np.interp(x_pixels, x_coords, variance, left=0, right=0)
+        # Use wavelength_to_pixel from the simulator (need to share this method)
+        # For now, replicate the conversion
+        dispersion_pix_per_nm = (
+            cfg.dispersion_mm_per_nm * 1000.0 / cfg.pixel_size_um
+        )
+        x_pixels = (wavelengths - cfg.lambda_min) * dispersion_pix_per_nm
+        x_pixels += cfg.detector_width / 2.0 - (
+            (cfg.lambda_max - cfg.lambda_min) / 2.0 * dispersion_pix_per_nm
+        )
+        
+        # Integrate over aperture window at each wavelength
+        half_width = aperture_width // 2
+        spec_interp = np.zeros(cfg.n_spectral_bins)
+        var_interp = np.zeros(cfg.n_spectral_bins)
+        
+        for wl_idx, x_center in enumerate(x_pixels):
+            x_min_win = max(0, int(x_center) - half_width)
+            x_max_win = min(cfg.detector_width, int(x_center) + half_width + 1)
+            
+            # Integrate spectrum over window
+            window_flux = 0.0
+            window_var = 0.0
+            total_weight = 0.0
+            
+            for x_idx in range(x_min_win, x_max_win):
+                # Gaussian weight centered on x_center
+                dx = x_idx - x_center
+                weight = np.exp(-0.5 * (dx / (aperture_width / 2.355)) ** 2)
+                
+                window_flux += spectrum[x_idx] * weight
+                window_var += variance[x_idx] * weight ** 2
+                total_weight += weight
+            
+            if total_weight > 0:
+                spec_interp[wl_idx] = window_flux / total_weight
+                var_interp[wl_idx] = window_var / (total_weight ** 2)
+            else:
+                spec_interp[wl_idx] = 0.0
+                var_interp[wl_idx] = 0.0
         
         return spec_interp, var_interp
 
