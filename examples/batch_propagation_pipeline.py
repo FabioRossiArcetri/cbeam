@@ -352,7 +352,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
         "core_res":      16,
         "clad_res":      60,
         "jack_res":      30,
-        "pixel_scale_um": 1,  # Physical scale of each pixel in the padded FFT grid (μm/px)
+        "pixel_scale_um": 0.8,  # Physical scale of each pixel in the padded FFT grid (μm/px)
         "ifunc_file":    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/ANDES_400pix_all_modes.fits',
     }
     params["rcore"]  = (1.8 * scaling_factor) / params["taper_factor"]
@@ -395,9 +395,19 @@ def build_and_characterize_lantern(p):
     
     tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_front"
     
-    #prop1.characterize(0,L1*1.75,save=True,tag=tag)
+    #prop1.characterize(0,L1,save=True,tag=tag)
 
-    prop1.load(tag)
+    #prop1.load(tag)
+
+    prop1.load_or_characterize(
+        load_tag=tag,
+        zi=0.0,
+        zf=L1,
+        mesh=None,
+        char_tag=tag,
+        save=True,
+        verbose=True,
+    )
 
     prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)    
     prop2.degen_groups  = default_degenetate_groups_back[p["nrings"]]
@@ -406,9 +416,15 @@ def build_and_characterize_lantern(p):
     prop2.load_init_conds(prop1)
     tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_back"
 
-    # prop2.characterize(L1*1.75,L1*1.75+L2*1.75,save=True,tag=tag)
-
-    prop2.load(tag)
+    prop2.load_or_characterize(
+        load_tag=tag,
+        zi=L1,
+        zf=L1+L2,
+        mesh=None,
+        char_tag=tag,
+        save=True,
+        verbose=True,
+    )
 
     return ChainPropagator([prop1, prop2])
 
@@ -476,11 +492,10 @@ class IncidentFieldGenerator:
         self.xp    = xp
 
         if pupil_template is not None:
-            # DM mask + influence-function matrix don't depend on
-            # propagation wavelength -- reuse a copy built once elsewhere
-            # instead of re-reading/re-stacking ifunc.influence_function.
+            # Reuse wavelength-independent pupil data
             self.mask_np, self.grid_size, self.num_modes, self.ifunc_matrix = pupil_template
         else:
+            # Build fresh from ifunc
             self.mask_np   = ifunc.mask_inf_func.get() > 0
             self.grid_size = self.mask_np.shape[0]
             self.num_modes = len(ifunc.influence_function)
@@ -512,7 +527,7 @@ class IncidentFieldGenerator:
         print(f"  Center offset: {center_offset}")
 
         # FIX 2: Retrieve and validate pixel scale
-        pixel_scale = self.p.get("pixel_scale_um", 1.0)
+        pixel_scale = self.p.get("pixel_scale_um", 0.8)
         print(f"  Pixel scale: {pixel_scale} μm/pixel")
         
         # FIX 3: CORRECT axis mapping

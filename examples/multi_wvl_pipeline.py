@@ -155,47 +155,6 @@ def _load_and_backfill_cmats(prop: Propagator, tag: str, verbose: bool = True) -
             print(f"    [{tag}] coupling matrix computed and cached.")
 
 
-def _load_or_characterize(
-    prop: Propagator,
-    tag: str,
-    zi: float,
-    zf: float,
-    verbose: bool = True,
-) -> None:
-    """
-    Load a Propagator's mode basis / coupling coefficients from cache if
-    available (Propagator.load(tag)); otherwise solve for them from
-    scratch with Propagator.characterize(zi, zf, save=True, tag=tag) and
-    let cbeam cache the result under that tag for next time.
-
-    characterize() is what actually does the FEM eigenmode solve at each
-    z step and computes the coupling-coefficient matrices -- it's the
-    same call that produced the original "19port_0800_front"/"_back"
-    cache files (see cbeam's 19-port lantern example). This is a genuine
-    solve, not the diffrax-based coupled-mode propagation done later in
-    .propagate() -- it's slow (~minutes) and is the real cost of adding a
-    wavelength.
-
-    Note: this catches (FileNotFoundError, OSError) as "no cache present".
-    If your cbeam version raises something else for a missing tag (e.g. a
-    bare Exception from a failed unpickle), widen the except clause
-    accordingly -- the intent is "anything that means the file isn't
-    there", not "silently swallow a real solve failure".
-    """
-    try:
-        _load_and_backfill_cmats(prop, tag, verbose=verbose)
-        if verbose:
-            print(f"    [{tag}] loaded cached characterization.")
-    except (FileNotFoundError, OSError) as exc:
-        if verbose:
-            print(f"    [{tag}] no cached characterization found ({exc}); "
-                  f"running characterize(zi={zi}, zf={zf}, save=True) -- "
-                  f"this can take several minutes ...")
-        prop.characterize(zi, zf, save=True, tag=tag)
-        if verbose:
-            print(f"    [{tag}] characterization complete and cached.")
-
-
 def build_and_characterize_lantern_at_wavelength(
     base_params: dict,
     wavelength_nm: float,
@@ -270,6 +229,19 @@ def build_and_characterize_lantern_at_wavelength(
     p_lambda = dict(base_params)
     p_lambda["wl"] = wavelength_nm / 1000.0
     p_lambda["wavelength_nm"] = wavelength_nm
+  
+    reference_wavelength_nm = base_params.get("wavelength_nm", 800.0)  # Default 800 nm
+    wavelength_scale_factor = wavelength_nm / reference_wavelength_nm
+    
+    # Focal plane scale is proportional to wavelength
+    p_lambda["pixel_scale_um"] = (
+        base_params["pixel_scale_um"] # * wavelength_scale_factor
+    )
+    
+    if verbose:
+        print(f"  Wavelength {wavelength_nm:.1f} nm:")
+        print(f"    Scale factor: {wavelength_scale_factor:.4f}")
+        print(f"    Pixel scale: {p_lambda['pixel_scale_um']:.4f} μm/px")
 
     z_ex = p_lambda["z_ex"]
     _z_split = z_split if z_split is not None else z_ex / 2.0
@@ -283,19 +255,48 @@ def build_and_characterize_lantern_at_wavelength(
     _degen_front = degen_groups if degen_groups is not None else default_degenetate_groups_front[base_params["nrings"]]
     _degen_back = [[i for i in range(n_modes) if i not in _skipped]]
 
-    prop1 = Propagator(p_lambda["wl"], PL_N, n_modes)
+    # build tags...
+    tag_front = f"{tag}_front"
+    tag_back  = f"{tag}_back"
+
+    # --- fast path: try load only using shared PL_N ---
+    try:
+        prop1 = Propagator(p_lambda["wl"], PL_N, n_modes)
+        prop1.degen_groups = _degen_front
+        prop1.skipped_modes = _skipped
+        prop1.load(tag_front)
+
+        prop2 = Propagator(p_lambda["wl"], PL_N, n_modes)
+        prop2.skipped_modes = _skipped
+        prop2.degen_groups = _degen_back
+        prop2.load_init_conds(prop1)
+        prop2.load(tag_back)
+
+        return p_lambda, ChainPropagator([prop1, prop2])
+
+    except (FileNotFoundError, OSError):
+        if verbose:
+            print(f"[{tag}] cache miss -> characterize with fresh geometry")
+
+    # --- fallback path: characterize with fresh geometry object ---
+    PL_local = build_lantern_geometry(p_lambda)  # NEW object, no shared state
+
+    prop1 = Propagator(p_lambda["wl"], PL_local, n_modes)
     prop1.degen_groups = _degen_front
     prop1.skipped_modes = _skipped
-    _load_or_characterize(prop1, f"{tag}_front", 0.0, _z_split, verbose=verbose)
+    prop1.load_or_characterize(
+        load_tag=tag_front, zi=0.0, zf=_z_split,
+        mesh=None, char_tag=tag_front, save=True, verbose=verbose
+    )
 
-    prop2 = Propagator(p_lambda["wl"], PL_N, n_modes)
+    prop2 = Propagator(p_lambda["wl"], PL_local, n_modes)
     prop2.skipped_modes = _skipped
     prop2.degen_groups = _degen_back
-    # Must happen before load/characterize: the back segment's initial
-    # eigenbasis is bootstrapped from the front segment's final one,
-    # whether the front segment was just loaded or just solved.
     prop2.load_init_conds(prop1)
-    _load_or_characterize(prop2, f"{tag}_back", _z_split, z_ex, verbose=verbose)
+    prop2.load_or_characterize(
+        load_tag=tag_back, zi=_z_split, zf=z_ex,
+        mesh=None, char_tag=tag_back, save=True, verbose=verbose
+    )
 
     # === RESTORE ORIGINAL BACKEND ===
     if original_backend == "jax":
@@ -310,25 +311,36 @@ def build_and_characterize_lantern_at_wavelength(
 # LAYER 2: MULTI-WAVELENGTH PIPELINE COLLECTION
 # =====================================================================
 
-def _force_release_memory() -> None:
+def _force_release_memory(clear_jax_cache: bool = True) -> None:
     """
-    Best-effort release of both Python- and Julia-side memory between
-    wavelengths. gc.collect() handles Python objects (breaking reference
-    cycles CPython's refcounting alone won't catch). cbeam's Julia
-    backend (accessed via PythonCall/juliacall -- see the
-    FEval.transverse_gradient calls in compute_cmats) has its own
-    garbage collector that isn't triggered just because Python drops its
-    references to the wrapping objects, so nudge it too. Safe no-op if
-    juliacall isn't importable or exposes a different entry point than
-    assumed here.
+    Best-effort release of Python, Julia, and JAX memory.
+    
+    Parameters
+    ----------
+    clear_jax_cache : bool
+        If True and JAX is available, clear JAX device caches.
     """
+    # Python garbage collection
     gc.collect()
+    
+    # Julia garbage collection (for FEM solver)
     try:
         from juliacall import Main as _jl
         _jl.GC.gc()
     except Exception:
         pass
-
+    
+    # JAX device memory cleanup
+    if clear_jax_cache:
+        try:
+            import jax
+            # Clear compilation cache
+            jax.clear_backends()
+            # Force device synchronization
+            for device in jax.devices():
+                device.synchronize_all_activity()
+        except Exception:
+            pass
 
 @dataclass
 class WavelengthEngine:
@@ -447,31 +459,16 @@ class MultiWavelengthPropagationPipeline:
         use_gpu: Optional[bool] = None,
         gen_chunk_size: Optional[int] = None,
         prop_chunk_size: Optional[int] = None,
-        integration_radius_um: Optional[float] = None,  # NEW PARAMETER (for this method only)
     ) -> np.ndarray:
         """
-        Propagate one batch of aberration configurations through the
-        lantern at every native wavelength.
-
-        Parameters
-        ----------
-        aberration_coeff_batch : ndarray, shape (n_fields, n_active_modes)
-        use_gpu, gen_chunk_size, prop_chunk_size : passed to pipelines
-        integration_radius_um : float, optional
-            If provided, spatially integrate the output field intensity over
-            circular apertures of this radius (in microns) centered on each
-            fiber core, rather than using modal coefficients directly. This
-            reduces wavelength-dependent jaggedness from mode shape variations.
-            Typical values: 2.5-4.0 μm. Default: None (use modal coefficients).
-
-        Returns
-        -------
-        spectra_complex : ndarray, shape (n_wavelengths_native, n_fields, n_fibers), complex128
+        Propagate through all wavelengths using spatial integration
+        (same method as Batched.ipynb).
         """
         n_wl = len(self.native_wavelengths_nm)
         n_fields = np.asarray(aberration_coeff_batch).shape[0]
-
-        spectra_complex = np.zeros((n_wl, n_fields, self.n_fibers), dtype=np.complex128)
+        
+        # Store REAL power (not complex) since spatial integration loses phase info
+        spectra_power = np.zeros((n_wl, n_fields, self.n_fibers), dtype=np.float64)
 
         for i, wl in enumerate(self.native_wavelengths_nm):
             if self.verbose:
@@ -490,20 +487,155 @@ class MultiWavelengthPropagationPipeline:
                 u0_batch, chunk_size=prop_chunk_size,
             )
             
-            # === Spatial integration happens AFTER propagation ===
-            if integration_radius_um is not None:
-                spectra_complex[i, :, :] = self._integrate_over_cores(
-                    engine, uf_batch, integration_radius_um
-                )
-            else:
-                # Original: just use modal coefficients
-                spectra_complex[i, :, :] = uf_batch[:, :self.n_fibers]
+            # === CORRECTED: Use spatial integration (same as Batched.ipynb) ===
+            spectra_power[i, :, :] = self._collect_signals_like_batched(
+                engine, uf_batch
+            )
 
             if not self.cache_engines:
                 del engine, u0_batch, uf_batch
                 _force_release_memory()
 
+        # Convert to complex for compatibility with existing code
+        # (phase info is lost, but amplitude is correct)
+        spectra_complex = np.sqrt(spectra_power).astype(np.complex128)
         return spectra_complex
+
+
+    def _collect_signals_like_batched(
+        self,
+        engine: WavelengthEngine,
+        uf_batch: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Collect signals using the same spatial integration method as Batched.ipynb.
+        
+        Parameters
+        ----------
+        engine : WavelengthEngine
+        uf_batch : ndarray, shape (n_fields, n_modes)
+        
+        Returns
+        -------
+        signals : ndarray, shape (n_fields, n_fibers), float64
+            Spatially integrated power at each fiber location
+        """
+        from scipy.interpolate import griddata
+        from scipy.ndimage import map_coordinates, maximum_filter
+        import numpy as np
+        
+        # Get output mesh and modes
+        z_final = engine.prop12.zs[-1]
+        mesh_final = engine.prop12.make_mesh_at_z(z_final)
+        waveguide_modes_final = engine.prop12.get_v(z_final)
+        
+        # Ensure numpy
+        if hasattr(waveguide_modes_final, '__array__'):
+            waveguide_modes_final = np.asarray(waveguide_modes_final)
+        if hasattr(mesh_final.points, '__array__'):
+            mesh_pts = np.asarray(mesh_final.points)
+        else:
+            mesh_pts = mesh_final.points
+        
+        # Transpose if needed
+        if waveguide_modes_final.shape[0] == len(mesh_pts):
+            waveguide_modes_final = waveguide_modes_final.T
+        
+        # Setup grid (same as Batched.ipynb)
+        plot_x_out = np.linspace(mesh_pts[:, 0].min(), mesh_pts[:, 0].max(), 400)
+        plot_y_out = np.linspace(mesh_pts[:, 1].min(), mesh_pts[:, 1].max(), 400)
+        X_plot_out, Y_plot_out = np.meshgrid(plot_x_out, plot_y_out)
+        dx = plot_x_out[1] - plot_x_out[0]
+        dy = plot_y_out[1] - plot_y_out[0]
+        x_min, y_min = plot_x_out[0], plot_y_out[0]
+        
+        # Calibrate core centers (cache this per wavelength)
+        cache_key = f"cores_{engine.wavelength_nm:.1f}"
+        if not hasattr(self, '_core_centers_cache'):
+            self._core_centers_cache = {}
+        
+        if cache_key not in self._core_centers_cache:
+            # Find core centers from mode profile
+            total_modes_profile = np.sum(np.abs(waveguide_modes_final)**2, axis=0)
+            total_modes_2d = griddata(
+                (mesh_pts[:, 0], mesh_pts[:, 1]), 
+                total_modes_profile,
+                (X_plot_out, Y_plot_out), 
+                method='linear', 
+                fill_value=0.0
+            )
+            
+            is_peak = (total_modes_2d == maximum_filter(total_modes_2d, size=21)) & \
+                    (total_modes_2d > 0.1 * np.max(total_modes_2d))
+            peak_rows, peak_cols = np.where(is_peak)
+            
+            core_centers = []
+            centroid_half_width = 4
+            for r, c in zip(peak_rows, peak_cols):
+                r_min_patch = max(0, r - centroid_half_width)
+                r_max_patch = min(total_modes_2d.shape[0], r + centroid_half_width + 1)
+                c_min_patch = max(0, c - centroid_half_width)
+                c_max_patch = min(total_modes_2d.shape[1], c + centroid_half_width + 1)
+                
+                patch = total_modes_2d[r_min_patch:r_max_patch, c_min_patch:c_max_patch]
+                r_indices, c_indices = np.meshgrid(
+                    np.arange(r_min_patch, r_max_patch), 
+                    np.arange(c_min_patch, c_max_patch), 
+                    indexing='ij'
+                )
+                
+                patch_sum = np.sum(patch)
+                if patch_sum > 0:
+                    sub_pixel_row = np.sum(r_indices * patch) / patch_sum
+                    sub_pixel_col = np.sum(c_indices * patch) / patch_sum
+                    cx = plot_x_out[0] + sub_pixel_col * dx
+                    cy = plot_y_out[0] + sub_pixel_row * dy
+                else:
+                    cx, cy = plot_x_out[c], plot_y_out[r]
+                
+                core_centers.append((cx, cy))
+            
+            # Sort (same as Batched.ipynb)
+            core_centers = sorted(core_centers, key=lambda p: (np.round(p[1], 2), np.round(p[0], 2)))
+            self._core_centers_cache[cache_key] = core_centers
+        
+        core_centers = self._core_centers_cache[cache_key]
+        
+        # Process each field
+        n_fields = uf_batch.shape[0]
+        signals = np.zeros((n_fields, self.n_fibers), dtype=np.float64)
+        
+        for field_idx in range(n_fields):
+            uf = uf_batch[field_idx, :]
+            
+            # Reconstruct spatial field
+            E_output_spatial = uf @ waveguide_modes_final
+            
+            # Interpolate to regular grid
+            uf_2d = griddata(
+                (mesh_pts[:, 0], mesh_pts[:, 1]), 
+                np.abs(E_output_spatial)**2,
+                (X_plot_out, Y_plot_out), 
+                method='linear', 
+                fill_value=0.0
+            )
+            
+            # Collect signals with 7×7 windows (same as Batched.ipynb)
+            n_window = 7
+            half_n = n_window // 2
+            offsets = np.arange(-half_n, half_n + 1)
+            
+            for fiber_idx in range(min(len(core_centers), self.n_fibers)):
+                cx, cy = core_centers[fiber_idx]
+                f_col = (cx - x_min) / dx
+                f_row = (cy - y_min) / dy
+                
+                sub_cols, sub_rows = np.meshgrid(f_col + offsets, f_row + offsets)
+                coords = np.vstack((sub_rows.ravel(), sub_cols.ravel()))
+                subimage_flat = map_coordinates(uf_2d, coords, order=3, mode='constant', cval=0.0)
+                signals[field_idx, fiber_idx] = np.mean(subimage_flat)
+        
+        return signals
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -672,7 +804,6 @@ class MultiWavelengthPropagationPipeline:
         spectra_complex = self.propagate_batch(
             aberration_coeff_batch, use_gpu=use_gpu,
             gen_chunk_size=gen_chunk_size, prop_chunk_size=prop_chunk_size,
-            integration_radius_um=integration_radius_um,
         )
 
         if output_wavelengths_nm is None:

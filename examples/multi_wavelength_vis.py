@@ -101,7 +101,6 @@ def plot_spectra_grid(
     plt.tight_layout()
     plt.show()
 
-
 def plot_wavelength_fiber_heatmap(
     power_spectra: np.ndarray,
     wl_nm: np.ndarray,
@@ -124,7 +123,7 @@ def plot_wavelength_fiber_heatmap(
         fig, ax = plt.subplots(figsize=(8, 6))
 
     im = ax.imshow(
-        data, aspect="auto", origin="lower", cmap="inferno",
+        data, aspect="equal", origin="lower", cmap="inferno",
         extent=[0, n_fibers, wl_nm.min(), wl_nm.max()],
     )
     ax.set_xlabel("Fiber index")
@@ -137,7 +136,6 @@ def plot_wavelength_fiber_heatmap(
         plt.tight_layout()
         plt.show()
     return ax
-
 
 # =====================================================================
 # ABERRATION-RAMP COMPARISONS
