@@ -67,7 +67,6 @@ def _wavelength_tag(wavelength_nm: float) -> str:
     an explicit {wavelength_nm: tag} mapping instead of this formula."""
     return f"{int(round(wavelength_nm)):04d}"
 
-
 def build_lantern_geometry(base_params: dict) -> PhotonicLantern:
     """
     Build the PhotonicLantern geometry once. None of PhotonicLantern's
@@ -235,7 +234,7 @@ def build_and_characterize_lantern_at_wavelength(
     
     # Focal plane scale is proportional to wavelength
     p_lambda["pixel_scale_um"] = (
-        base_params["pixel_scale_um"] # * wavelength_scale_factor
+        base_params["pixel_scale_um"] * wavelength_scale_factor
     )
     
     if verbose:

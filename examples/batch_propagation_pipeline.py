@@ -338,7 +338,6 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     """Return a dict of all setup constants and derived parameters."""
     wavelength_nm = wavelength_um * 1000.0
     scaling_factor = wavelength_um / DEFAULT_WAVELENGTH_UM
-    scaling_factor = 1.0
     params = {
         "nrings":        nrings,
         "wl":            wavelength_um,
@@ -352,7 +351,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
         "core_res":      16,
         "clad_res":      60,
         "jack_res":      30,
-        "pixel_scale_um": 0.8,  # Physical scale of each pixel in the padded FFT grid (μm/px)
+        "pixel_scale_um": 0.8 * scaling_factor,  # Physical scale of each pixel in the padded FFT grid (μm/px)
         "ifunc_file":    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/ANDES_400pix_all_modes.fits',
     }
     params["rcore"]  = (1.8 * scaling_factor) / params["taper_factor"]
@@ -376,7 +375,6 @@ def _wavelength_tag(wavelength_nm: float) -> str:
     an explicit {wavelength_nm: tag} mapping instead of this formula."""
     return f"{int(round(wavelength_nm)):04d}"
 
-
 def build_and_characterize_lantern(p):
     """Set up the PhotonicLantern and return a ChainPropagator."""        
     PL_nrings = PhotonicLantern(
@@ -394,63 +392,61 @@ def build_and_characterize_lantern(p):
     wavelength_nm = p["wavelength_nm"]
     
     tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_front"
-    
-    #prop1.characterize(0,L1,save=True,tag=tag)
-
-    #prop1.load(tag)
-
     prop1.load_or_characterize(
-        load_tag=tag,
-        zi=0.0,
-        zf=L1,
-        mesh=None,
-        char_tag=tag,
-        save=True,
-        verbose=True,
+        load_tag=tag, zi=0.0, zf=L1,
+        mesh=None, char_tag=tag, save=True, verbose=True,
     )
 
-    prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)    
-    prop2.degen_groups  = default_degenetate_groups_back[p["nrings"]]
+    prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)
+    # FIX: in the back half the 19 output cores are separating into
+    # independent single-mode fibres — do NOT lump them into one giant
+    # degenerate group, as that causes track_modes to scramble them when
+    # the per-mode neff splitting is small (e.g. at 0.81 µm).
+    prop2.degen_groups  = []   # no degeneracy grouping in the back half
     prop2.skipped_modes = default_skipped_modes_back[p["nrings"]]
-
     prop2.load_init_conds(prop1)
-    tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_back"
 
+    tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_back"
     prop2.load_or_characterize(
-        load_tag=tag,
-        zi=L1,
-        zf=L1+L2,
-        mesh=None,
-        char_tag=tag,
-        save=True,
-        verbose=True,
+        load_tag=tag, zi=L1, zf=L1+L2,
+        mesh=prop1.mesh,   # share the same reference mesh
+        char_tag=tag, save=True, verbose=True,
     )
 
     return ChainPropagator([prop1, prop2])
-
 
 def get_waveguide_properties(prop12, mesh_z=0):
     """Extract waveguide modal properties at a given z position."""
     p_segment  = prop12.get_prop(mesh_z)
     mesh_obj   = p_segment.mesh
-    mesh_areas = p_segment.wvg.assign_IOR()
+    # assign_IOR() is a side-effect call; its return value (a dict) is not mesh areas
+    p_segment.wvg.assign_IOR()
     modes      = p_segment.vs
 
     if len(modes.shape) == 3:
         z_idx        = np.argmin(np.abs(p_segment.zs - mesh_z))
-        active_modes = modes[z_idx]
+        active_modes = modes[z_idx]          # shape: (n_modes, n_mesh_points)
     else:
-        active_modes = modes
+        active_modes = modes                 # shape: (n_modes, n_mesh_points)
 
     n_mesh_points = mesh_obj.points.shape[0]
-    areas         = getattr(p_segment, 'mesh_areas', np.ones(n_mesh_points))
 
-    if active_modes.shape[0] == n_mesh_points:
+    # FIXED: enforce (n_modes, n_mesh_points) unambiguously using n_mesh_points
+    # The old heuristic `if shape[0] == n_mesh_points` is wrong when n_modes
+    # happens to equal n_mesh_points, and produces the wrong shape silently.
+    if active_modes.shape[1] != n_mesh_points:
         active_modes = active_modes.T
+    assert active_modes.shape[1] == n_mesh_points, \
+        f"Mode shape {active_modes.shape} inconsistent with mesh ({n_mesh_points} pts)"
+
+    # Use the FE mass matrix diagonal as proper integration weights
+    from wavesolve.fe_solver import construct_B
+    B     = construct_B(mesh_obj, sparse=True)
+    areas = np.array(B.diagonal())
 
     n_modes   = active_modes.shape[0]
     points_2d = np.stack((mesh_obj.points[:, 0], mesh_obj.points[:, 1]), axis=-1)
-    
+
     return {
         'mesh':          mesh_obj,
         'mesh_areas':    areas,
