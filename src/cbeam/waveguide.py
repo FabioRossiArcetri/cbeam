@@ -241,13 +241,54 @@ class Prim2D:
         self.skip_refinement = False
 
     def make_poly(self, geom):
-        if hasattr(self.points[0][0], '__len__'):
-            ps = [geom.add_polygon(p) for p in self.points]
-            poly = geom.boolean_union(ps)[0]
-        else:
-            poly = geom.add_polygon(self.points)
-        return poly
+        import numpy as np
 
+        def _to_xyz(points_like):
+            p = np.asarray(points_like, dtype=np.float64)
+
+            # Single point [x,y] is invalid as a polygon
+            if p.ndim == 1:
+                raise ValueError(
+                    f"Polygon received a single point shape={p.shape}; expected (N,2) with N>=3."
+                )
+
+            if p.ndim != 2:
+                raise ValueError(f"Invalid polygon ndim={p.ndim}, shape={p.shape}")
+
+            if p.shape[1] == 2:
+                p = np.column_stack([p, np.zeros((p.shape[0],), dtype=np.float64)])
+            elif p.shape[1] != 3:
+                raise ValueError(f"Invalid polygon second dim={p.shape[1]}, shape={p.shape}")
+
+            if p.shape[0] < 3:
+                raise ValueError(f"Polygon has too few vertices: {p.shape[0]}")
+            return p
+
+        pts = self.points
+
+        # Try interpreting as a single polygon first
+        try:
+            p_single = np.asarray(pts, dtype=np.float64)
+            if p_single.ndim == 2 and p_single.shape[1] in (2, 3):
+                return geom.add_polygon(_to_xyz(p_single))
+        except Exception:
+            pass
+
+        # Otherwise treat as list of polygons
+        polys = []
+        for k, sub in enumerate(pts):
+            sub_arr = np.asarray(sub, dtype=np.float64)
+            if sub_arr.ndim == 1 and sub_arr.shape[0] in (2, 3):
+                # This means caller passed list-of-points, not list-of-polygons:
+                # accumulate and handle as one polygon after loop.
+                raise ValueError(
+                    f"Ambiguous polygon structure at index {k}: got point shape={sub_arr.shape}. "
+                    f"Expected each entry to be a polygon array (N,2)/(N,3)."
+                )
+            polys.append(geom.add_polygon(_to_xyz(sub_arr)))
+
+        return geom.boolean_union(polys)[0]
+    
     def update(self, points):
         self.points = xp.array(points)
         self.res = len(self.points)
@@ -536,6 +577,7 @@ class Waveguide:
                     _p.update(z)
             else:
                 p.update(z)
+
     def _make_mesh_dep(self, algo=6):
         """
         Deprecated meshing function. Construct a finite element mesh for the Waveguide cross-section at the currently set 
@@ -557,6 +599,7 @@ class Waveguide:
                     polygons.append(els)
 
             # diff the polygons
+            
             for i in range(0, len(self.prim3Dgroups) - 1):
                 polys = polygons[i]
                 _polys = polygons[i+1]
@@ -618,20 +661,28 @@ class Waveguide:
         with pygmsh.occ.Geometry() as geom:
             gmsh.option.setNumber('General.Terminal', 0)
             polygons = []
-            for el in self.prim3Dgroups:
+            for i, el in enumerate(self.prim3Dgroups):
                 if type(el) != list:
-                    polygons.append(el.prim2D.make_poly(geom))
-                else:
-                    els = []
-                    for _el in el:
-                        els.append(_el.prim2D.make_poly(geom))
-                    polygons.append(els)
-
+                    try:
+                        polygons.append(el.prim2D.make_poly(geom))
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"Failed building polygon for prim3Dgroups[{i}] "
+                            f"type={type(el)} prim2D={type(el.prim2D)} "
+                            f"points_type={type(el.prim2D.points)}"
+                        ) from e
             # diff the polygons
-            for i in range(0,len(self.prim3Dgroups)-1):
-                polys = polygons[i]
-                _polys = polygons[i+1]
-                polys = geom.boolean_difference(polys,_polys,delete_other=False,delete_first=True)
+            # subtract nested polygon groups safely
+            if len(polygons) == 0:
+                raise ValueError("No polygons generated for mesh boundary construction.")
+
+            polys = polygons[0]
+            for i in range(1, len(polygons)):
+                polys = geom.boolean_difference(
+                    polys, polygons[i],
+                    delete_other=False,
+                    delete_first=True
+                )
 
             # add physical groups
             for i,el in enumerate(polygons):

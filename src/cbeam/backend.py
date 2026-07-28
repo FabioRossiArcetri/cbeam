@@ -39,9 +39,12 @@ def get_jax_device():
         return None
     import jax
     idx = int(os.environ.get("CBEAM_JAX_DEVICE_INDEX", "0"))
-    devices = jax.devices()
+    devices = jax.devices("gpu")
     if idx >= len(devices):
         idx = 0
+
+    
+    jax.default_device = devices[idx]
     return devices[idx]
 
 

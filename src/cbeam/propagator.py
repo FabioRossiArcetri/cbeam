@@ -648,6 +648,18 @@ class Propagator:
 
         cmats      = self.xp.array(cmats)
         self.cmats = cmats
+        
+        # === ADD THIS BLOCK ===
+        print("\n[DEBUG] Cleaning up memory before rebuilding splines...")
+        # Explicitly delete large temporary objects
+        del vi, dvdz
+        if not _linear:
+            del points, dmeshdz
+        import gc
+        gc.collect()
+        print("[DEBUG] Memory cleanup complete")
+        # === END OF NEW BLOCK ===
+        
         self.make_interp_funcs(zs, make_cmat=True, make_neff=True, make_v=True)
         if save:
             self.save(cmats=cmats, tag=tag)
@@ -658,104 +670,260 @@ class Propagator:
     # =========================================================================
 
     def make_interp_funcs(self, zs=None, make_neff=True, make_cmat=True, make_v=True):
-        """Build all interpolation / spline objects for both backends.
-
-        This is the *single* place where splines are constructed.  It fully
-        replaces the old ``_prepare_jax_splines`` duplication.
-        """
+        """Build all interpolation / spline objects for both backends."""
+        
+        print(f"\n{'='*70}")
+        print(f"[DEBUG] make_interp_funcs() STARTED")
+        print(f"[DEBUG]   backend: {self.backend}")
+        print(f"[DEBUG]   make_neff={make_neff}, make_cmat={make_cmat}, make_v={make_v}")
+        print(f"{'='*70}")
+        
         if zs is None:
+            print(f"[DEBUG] Using self.zs (copying)...")
             zs = self.xp.copy(self.zs)
-
-        # =====================================================================
-        # JAX BACKEND
-        # =====================================================================
-        if self.backend == "jax":
-            import jax.numpy as jnp
-            import diffrax
-
-            zs_jnp = jnp.asarray(zs, dtype=jnp.float64)
-
-            # -----------------------------------------------------------------
-            # Effective indices
-            # -----------------------------------------------------------------
-            if make_neff and self.neffs is not None:
-                neff_data    = jnp.asarray(self.neffs[:, :self.Nmax], dtype=jnp.float64)
-                neff_spline  = myCubicSpline(zs_jnp, neff_data, axis=0)
-
-                self._prop_neffs_spline    = neff_spline
-                self._prop_int_neffs_func  = neff_spline.antiderivative()
-                self._prop_dif_neffs_func  = neff_spline.derivative()
-                self._dif_neffs_spline_jax = self._prop_dif_neffs_func  # alias
-
-                # Legacy per-mode wrappers
-                _anti = self._prop_int_neffs_func
-                _dif  = self._prop_dif_neffs_func
-                self.neffs_int_funcs = [
-                    (lambda i: (lambda z: _anti(z)[i]))(i) for i in range(self.Nmax)
-                ]
-                self.neffs_dif_funcs = [
-                    (lambda i: (lambda z: _dif(z)[i]))(i)  for i in range(self.Nmax)
-                ]
-                # These are not used in the JAX path but keep attribute consistent
-                self.neffs_funcs  = None
-                self.neffs_spline = None
-
-            # -----------------------------------------------------------------
-            # Coupling matrices
-            # -----------------------------------------------------------------
-            if make_cmat and self.cmats is not None:
-                cmats_data = jnp.asarray(self.cmats, dtype=jnp.float64)
-
-                # Skew-symmetric form used inside the ODE
-                cmats_skew       = 0.5 * (jnp.swapaxes(cmats_data, 1, 2) - cmats_data)
-                self._prop_M_spline    = myCubicSpline(zs_jnp, cmats_skew, axis=0)
-
-                # Full-matrix form used by get_cmat()
-                self._cmat_spline_jax  = myCubicSpline(zs_jnp, cmats_data, axis=0)
-
-                self.cmats_funcs  = None
-                self.cmats_spline = None
-
-            # -----------------------------------------------------------------
-            # Eigenmodes  (complex — use diffrax Hermite interpolation)
-            # -----------------------------------------------------------------
-            if make_v and self.vs is not None:
-                vs_jnp   = jnp.asarray(self.vs, dtype=jnp.complex128)
-                v_coeffs = diffrax.backward_hermite_coefficients(zs_jnp, vs_jnp)
-                _spline_v = diffrax.CubicInterpolation(zs_jnp, v_coeffs)
-                self.get_v = _spline_v.evaluate
-
-            self._splines_ready = True
-
+            print(f"[DEBUG]   zs.shape: {zs.shape}, dtype: {zs.dtype}")
+        else:
+            print(f"[DEBUG] Using provided zs: shape={zs.shape}, dtype={zs.dtype}")
+        
         # =====================================================================
         # NUMPY BACKEND
         # =====================================================================
-        else:
+        if self.backend != "jax":
+            print(f"\n[DEBUG] === NUMPY BACKEND PATH ===")
+            
             if make_cmat and self.cmats is not None:
+                print(f"[DEBUG] Building cmat univariate splines...")
+                print(f"[DEBUG]   cmats: shape={self.cmats.shape}")
                 def _make_c(i, j):
                     assert i < j
                     return UnivariateSpline(
                         zs, 0.5 * (self.cmats[:, i, j] - self.cmats[:, j, i]),
                         ext=0, s=0)
                 cmat_funcs = []
+                n_splines = (self.Nmax * (self.Nmax - 1)) // 2
+                print(f"[DEBUG]   Creating {n_splines} splines...")
                 for j in range(1, self.Nmax):
                     for i in range(j):
                         cmat_funcs.append(_make_c(i, j))
-                self.cmats_funcs  = cmat_funcs
+                self.cmats_funcs = cmat_funcs
                 self.cmats_spline = None
+                print(f"[DEBUG]   ✓ cmat splines complete")
 
             if make_neff and self.neffs is not None:
+                print(f"[DEBUG] Building neff univariate splines...")
+                print(f"[DEBUG]   neffs: shape={self.neffs.shape}")
                 neff_funcs = [
                     UnivariateSpline(zs, self.neffs[:, i], s=0)
                     for i in range(self.Nmax)
                 ]
-                self.neffs_funcs     = neff_funcs
-                self.neffs_spline    = None
+                self.neffs_funcs = neff_funcs
+                self.neffs_spline = None
                 self.neffs_int_funcs = [f.antiderivative() for f in neff_funcs]
-                self.neffs_dif_funcs = [f.derivative()     for f in neff_funcs]
+                self.neffs_dif_funcs = [f.derivative() for f in neff_funcs]
+                print(f"[DEBUG]   ✓ neff splines complete")
+
+            # === MODIFIED BLOCK ===
+            if make_v and self.vs is not None:
+                # Don't rebuild if it already exists
+                if hasattr(self, 'get_v') and callable(self.get_v):
+                    print(f"[DEBUG] vs spline already exists - skipping rebuild")
+                else:
+                    import gc
+                    gc.collect()  # Force cleanup before large allocation
+                    
+                    print(f"[DEBUG] Building vs cubic spline...")
+                    print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
+                    self.get_v = myCubicSpline(zs, self.vs, axis=0)
+                    print(f"[DEBUG]   ✓ vs spline complete")
+            # === END MODIFIED BLOCK ===
+            
+            print(f"\n[DEBUG] ✓✓✓ NUMPY backend splines ALL COMPLETE ✓✓✓")
+            print(f"{'='*70}\n")
+        
+        # =====================================================================
+        # JAX BACKEND
+        # =====================================================================
+        if self.backend == "jax":
+            print(f"\n[DEBUG] === JAX BACKEND PATH ===")
+            import jax
+            import jax.numpy as jnp
+            import diffrax
+            
+            print(f"[DEBUG] JAX version: {jax.__version__}")
+            print(f"[DEBUG] Available devices: {jax.devices()}")
+            
+            try:
+                print(f"[DEBUG] Converting zs to JAX array...")
+                print(f"[DEBUG]   Input zs: type={type(zs)}, shape={zs.shape}, nbytes={zs.nbytes/1e6:.2f} MB")
+                zs_jnp = jnp.asarray(zs, dtype=jnp.float64)
+                print(f"[DEBUG]   ✓ zs_jnp created successfully")
+                print(f"[DEBUG]     shape: {zs_jnp.shape}, dtype: {zs_jnp.dtype}")
+            except Exception as e:
+                print(f"[ERROR] ✗ Failed to convert zs to JAX: {e}")
+                raise
+
+            # -----------------------------------------------------------------
+            # Effective indices
+            # -----------------------------------------------------------------
+            if make_neff and self.neffs is not None:
+                print(f"\n[DEBUG] --- Building NEFF splines ---")
+                print(f"[DEBUG]   self.neffs: shape={self.neffs.shape}, dtype={self.neffs.dtype}")
+                print(f"[DEBUG]   Memory: {self.neffs.nbytes/1e6:.2f} MB")
+                print(f"[DEBUG]   Nmax: {self.Nmax}")
+                
+                try:
+                    print(f"[DEBUG]   Slicing neffs[:, :{self.Nmax}]...")
+                    neff_slice = self.neffs[:, :self.Nmax]
+                    print(f"[DEBUG]   ✓ Sliced: shape={neff_slice.shape}")
+                    
+                    print(f"[DEBUG]   Converting to JAX array (float64)...")
+                    neff_data = jnp.asarray(neff_slice, dtype=jnp.float64)
+                    print(f"[DEBUG]   ✓ neff_data created: shape={neff_data.shape}, dtype={neff_data.dtype}")
+                    
+                    print(f"[DEBUG]   Building cubic spline...")
+                    neff_spline = myCubicSpline(zs_jnp, neff_data, axis=0)
+                    print(f"[DEBUG]   ✓ neff_spline created")
+                    
+                    print(f"[DEBUG]   Computing antiderivative...")
+                    self._prop_neffs_spline = neff_spline
+                    self._prop_int_neffs_func = neff_spline.antiderivative()
+                    print(f"[DEBUG]   ✓ Antiderivative computed")
+                    
+                    print(f"[DEBUG]   Computing derivative...")
+                    self._prop_dif_neffs_func = neff_spline.derivative()
+                    self._dif_neffs_spline_jax = self._prop_dif_neffs_func
+                    print(f"[DEBUG]   ✓ Derivative computed")
+
+                    # Legacy per-mode wrappers
+                    print(f"[DEBUG]   Creating legacy per-mode wrapper functions...")
+                    _anti = self._prop_int_neffs_func
+                    _dif = self._prop_dif_neffs_func
+                    self.neffs_int_funcs = [
+                        (lambda i: (lambda z: _anti(z)[i]))(i) for i in range(self.Nmax)
+                    ]
+                    self.neffs_dif_funcs = [
+                        (lambda i: (lambda z: _dif(z)[i]))(i) for i in range(self.Nmax)
+                    ]
+                    self.neffs_funcs = None
+                    self.neffs_spline = None
+                    print(f"[DEBUG]   ✓ NEFF splines complete")
+                    
+                except Exception as e:
+                    print(f"[ERROR] ✗ Failed building neff splines: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
+
+            # -----------------------------------------------------------------
+            # Coupling matrices
+            # -----------------------------------------------------------------
+            if make_cmat and self.cmats is not None:
+                print(f"\n[DEBUG] --- Building CMAT splines ---")
+                print(f"[DEBUG]   self.cmats: shape={self.cmats.shape}, dtype={self.cmats.dtype}")
+                print(f"[DEBUG]   Memory: {self.cmats.nbytes/1e6:.2f} MB")
+                print(f"[DEBUG]   Is complex: {np.iscomplexobj(self.cmats)}")
+                
+                try:
+                    print(f"[DEBUG]   Converting to JAX array (float64)...")
+                    cmats_data = jnp.asarray(self.cmats, dtype=jnp.float64)
+                    print(f"[DEBUG]   ✓ cmats_data created: shape={cmats_data.shape}, dtype={cmats_data.dtype}")
+
+                    print(f"[DEBUG]   Computing skew-symmetric form...")
+                    # Skew-symmetric form used inside the ODE
+                    cmats_skew = 0.5 * (jnp.swapaxes(cmats_data, 1, 2) - cmats_data)
+                    print(f"[DEBUG]   ✓ cmats_skew: shape={cmats_skew.shape}")
+                    
+                    print(f"[DEBUG]   Building M_spline (skew-symmetric)...")
+                    self._prop_M_spline = myCubicSpline(zs_jnp, cmats_skew, axis=0)
+                    print(f"[DEBUG]   ✓ M_spline created")
+
+                    print(f"[DEBUG]   Building cmat_spline (full matrix)...")
+                    # Full-matrix form used by get_cmat()
+                    self._cmat_spline_jax = myCubicSpline(zs_jnp, cmats_data, axis=0)
+                    print(f"[DEBUG]   ✓ cmat_spline created")
+
+                    self.cmats_funcs = None
+                    self.cmats_spline = None
+                    print(f"[DEBUG]   ✓ CMAT splines complete")
+                    
+                except Exception as e:
+                    print(f"[ERROR] ✗ Failed building cmat splines: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
+
+            # -----------------------------------------------------------------
+            # Eigenmodes  (complex — use diffrax Hermite interpolation)
+            # -----------------------------------------------------------------
+            if make_v and self.vs is not None:
+                # Don't rebuild if it already exists
+                if hasattr(self, 'get_v') and callable(self.get_v):
+                    print(f"[DEBUG] vs spline already exists - skipping rebuild")
+                else:
+                    import gc
+                    gc.collect()  # Force cleanup before large allocation
+                    
+                    print(f"[DEBUG] Building vs cubic spline...")
+                    print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
+                    self.get_v = myCubicSpline(zs, self.vs, axis=0)
+                    print(f"[DEBUG]   ✓ vs spline complete")
+
+                    self._splines_ready = True
+                    print(f"\n[DEBUG] ✓✓✓ JAX backend splines ALL COMPLETE ✓✓✓")
+                    print(f"{'='*70}\n")
+
+        # =====================================================================
+        # NUMPY BACKEND
+        # =====================================================================
+        else:
+            print(f"\n[DEBUG] === NUMPY BACKEND PATH ===")
+            
+            if make_cmat and self.cmats is not None:
+                print(f"[DEBUG] Building cmat univariate splines...")
+                print(f"[DEBUG]   cmats: shape={self.cmats.shape}")
+                def _make_c(i, j):
+                    assert i < j
+                    return UnivariateSpline(
+                        zs, 0.5 * (self.cmats[:, i, j] - self.cmats[:, j, i]),
+                        ext=0, s=0)
+                cmat_funcs = []
+                n_splines = (self.Nmax * (self.Nmax - 1)) // 2
+                print(f"[DEBUG]   Creating {n_splines} splines...")
+                for j in range(1, self.Nmax):
+                    for i in range(j):
+                        cmat_funcs.append(_make_c(i, j))
+                self.cmats_funcs = cmat_funcs
+                self.cmats_spline = None
+                print(f"[DEBUG]   ✓ cmat splines complete")
+
+            if make_neff and self.neffs is not None:
+                print(f"[DEBUG] Building neff univariate splines...")
+                print(f"[DEBUG]   neffs: shape={self.neffs.shape}")
+                neff_funcs = [
+                    UnivariateSpline(zs, self.neffs[:, i], s=0)
+                    for i in range(self.Nmax)
+                ]
+                self.neffs_funcs = neff_funcs
+                self.neffs_spline = None
+                self.neffs_int_funcs = [f.antiderivative() for f in neff_funcs]
+                self.neffs_dif_funcs = [f.derivative() for f in neff_funcs]
+                print(f"[DEBUG]   ✓ neff splines complete")
 
             if make_v and self.vs is not None:
-                self.get_v = myCubicSpline(zs, self.vs, axis=0)
+                # Don't rebuild if it already exists
+                if hasattr(self, 'get_v') and callable(self.get_v):
+                    print(f"[DEBUG] vs spline already exists - skipping rebuild")
+                else:
+                    import gc
+                    gc.collect()  # Force cleanup before large allocation
+                    
+                    print(f"[DEBUG] Building vs cubic spline...")
+                    print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
+                    self.get_v = myCubicSpline(zs, self.vs, axis=0)
+                    print(f"[DEBUG]   ✓ vs spline complete")
+            
+            print(f"\n[DEBUG] ✓✓✓ NUMPY backend splines ALL COMPLETE ✓✓✓")
+            print(f"{'='*70}\n")
 
     def _prepare_jax_splines(self):
         """Ensure JAX splines are initialised.
@@ -847,19 +1015,85 @@ class Propagator:
 
     def save(self, zs=None, cmats=None, neffs=None, vs=None,
              meshpoints=None, tag=""):
+        
+        print("saving propagation data to " + self.save_dir + " ...")
         ps = "" if tag == "" else "_" + tag
         if vs is not None:
             vs = self.xp.array(vs)
+            print('saving eigenmodes to ' + self.save_dir + '/eigenmodes/eigenmodes' + ps + '.npy')
             self.xp.save(self.save_dir + '/eigenmodes/eigenmodes' + ps, vs)
         if cmats is not None:
+            print('saving coupling coefficients to ' + self.save_dir + '/cplcoeffs/cplcoeffs' + ps + '.npy')
             self.xp.save(self.save_dir + '/cplcoeffs/cplcoeffs' + ps, cmats)
         if neffs is not None:
+            print('saving effective indices to ' + self.save_dir + '/eigenvalues/eigenvalues' + ps + '.npy')
             self.xp.save(self.save_dir + '/eigenvalues/eigenvalues' + ps, neffs)
         if zs is not None:
+            print('saving z values to ' + self.save_dir + '/zvals/zvals' + ps + '.npy')
             self.xp.save(self.save_dir + '/zvals/zvals' + ps, zs)
         if meshpoints is not None and len(meshpoints) > 0:
+            print('saving mesh points to ' + self.save_dir + '/meshpoints/meshpoints' + ps + '.npy')
             self.xp.save(self.save_dir + '/meshpoints/meshpoints' + ps, meshpoints)
 
+    def load_or_characterize(
+        self,
+        load_tag: str = "",
+        zi: float | None = None,
+        zf: float | None = None,
+        mesh=None,
+        char_tag: str | None = None,
+        save: bool = True,
+        verbose: bool = True,
+        catch_exceptions=(FileNotFoundError, OSError),
+    ):
+        """
+        Try loading cached propagator data; if unavailable, run characterize(...).
+
+        Parameters
+        ----------
+        load_tag : str
+            Tag used by load().
+        zi, zf : float
+            Required if characterize() must be run.
+        mesh : optional
+            Passed to characterize().
+        char_tag : str or None
+            Tag for characterize(); if None, defaults to load_tag.
+        save : bool
+            Passed to characterize(); should usually be True so cache is created.
+        verbose : bool
+            Print what path is taken.
+        catch_exceptions : tuple[type]
+            Exceptions treated as cache-miss when calling load().
+
+        Returns
+        -------
+        str
+            "loaded" if cache loaded, "characterized" if characterize() ran.
+        """
+        if char_tag is None:
+            char_tag = load_tag
+
+        try:
+            self.load(load_tag)
+            if verbose:
+                print(f"[Propagator] loaded cache (tag='{load_tag}')")
+            return "loaded"
+        except catch_exceptions as exc:
+            if zi is None or zf is None:
+                raise ValueError(
+                    "zi and zf are required to characterize when cache is missing."
+                ) from exc
+            if verbose:
+                print(
+                    f"[Propagator] cache miss for tag='{load_tag}' ({exc}); "
+                    f"running characterize(zi={zi}, zf={zf}, tag='{char_tag}', save={save})"
+                )
+            self.characterize(zi, zf, mesh=mesh, tag=char_tag, save=save)
+            if verbose:
+                print(f"[Propagator] characterize complete (tag='{char_tag}')")
+            return "characterized"
+        
     def load(self, tag=""):
         """Load saved propagation data from files identified by *tag*."""
         ps = "" if tag == "" else "_" + tag
