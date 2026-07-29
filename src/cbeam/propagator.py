@@ -23,6 +23,7 @@ from cbeam import FEval
 
 from scipy.interpolate import make_interp_spline  # noqa: F401 (kept for external callers)
 import numpy as np
+import meshio
 
 # ---------------------------------------------------------------------------
 # Module-level colourmap — always built with plain numpy; must not hold any
@@ -141,6 +142,8 @@ class Propagator:
         """Solve for waveguide modes at a given z value."""
         mesh     = self.make_mesh_at_z(z) if mesh is None else mesh
         IOR_dict = self.wvg.assign_IOR()
+        print("IOR regions:", list(IOR_dict.keys()))
+
         w, v, N  = solve_waveguide(mesh, self.wl, IOR_dict, sparse=True, Nmax=self.Nmax)
         self.mesh = mesh
         return get_eff_index(self.wl, w), v
@@ -420,6 +423,8 @@ class Propagator:
         min_zstep   = self.min_zstep_neff
         neff_interp = None
         IOR_dict    = self.wvg.assign_IOR()
+        print("IOR regions:", list(IOR_dict.keys()))
+
         z = zi
         print("computing effective indices ...")
 
@@ -508,10 +513,13 @@ class Propagator:
 
         ps          = "_" + tag if tag is not None else ""
         meshwriteto = (self.save_dir + "/meshes/mesh" + ps) if save else None
+        
         mesh        = self.generate_mesh(writeto=meshwriteto) if mesh is None else mesh
         print("mesh has ", len(mesh.points), " points")
         _mesh    = copy.deepcopy(mesh)
         IOR_dict = self.wvg.assign_IOR()
+        print("IOR regions:", list(IOR_dict.keys()))
+
         z = zi
         print("computing modes ...")
 
@@ -724,17 +732,13 @@ class Propagator:
 
             # === MODIFIED BLOCK ===
             if make_v and self.vs is not None:
-                # Don't rebuild if it already exists
-                if hasattr(self, 'get_v') and callable(self.get_v):
-                    print(f"[DEBUG] vs spline already exists - skipping rebuild")
-                else:
-                    import gc
-                    gc.collect()  # Force cleanup before large allocation
-                    
-                    print(f"[DEBUG] Building vs cubic spline...")
-                    print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
-                    self.get_v = myCubicSpline(zs, self.vs, axis=0)
-                    print(f"[DEBUG]   ✓ vs spline complete")
+                import gc
+                gc.collect()  # Force cleanup before large allocation
+                
+                print(f"[DEBUG] Building vs cubic spline...")
+                print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
+                self.get_v = myCubicSpline(zs, self.vs, axis=0)
+                print(f"[DEBUG]   ✓ vs spline complete")
             # === END MODIFIED BLOCK ===
             
             print(f"\n[DEBUG] ✓✓✓ NUMPY backend splines ALL COMPLETE ✓✓✓")
@@ -856,21 +860,17 @@ class Propagator:
             # Eigenmodes  (complex — use diffrax Hermite interpolation)
             # -----------------------------------------------------------------
             if make_v and self.vs is not None:
-                # Don't rebuild if it already exists
-                if hasattr(self, 'get_v') and callable(self.get_v):
-                    print(f"[DEBUG] vs spline already exists - skipping rebuild")
-                else:
-                    import gc
-                    gc.collect()  # Force cleanup before large allocation
-                    
-                    print(f"[DEBUG] Building vs cubic spline...")
-                    print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
-                    self.get_v = myCubicSpline(zs, self.vs, axis=0)
-                    print(f"[DEBUG]   ✓ vs spline complete")
+                import gc
+                gc.collect()  # Force cleanup before large allocation
+                
+                print(f"[DEBUG] Building vs cubic spline...")
+                print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
+                self.get_v = myCubicSpline(zs, self.vs, axis=0)
+                print(f"[DEBUG]   ✓ vs spline complete")
 
-                    self._splines_ready = True
-                    print(f"\n[DEBUG] ✓✓✓ JAX backend splines ALL COMPLETE ✓✓✓")
-                    print(f"{'='*70}\n")
+                self._splines_ready = True
+                print(f"\n[DEBUG] ✓✓✓ JAX backend splines ALL COMPLETE ✓✓✓")
+                print(f"{'='*70}\n")
 
         # =====================================================================
         # NUMPY BACKEND
@@ -909,19 +909,17 @@ class Propagator:
                 self.neffs_dif_funcs = [f.derivative() for f in neff_funcs]
                 print(f"[DEBUG]   ✓ neff splines complete")
 
-            if make_v and self.vs is not None:
-                # Don't rebuild if it already exists
-                if hasattr(self, 'get_v') and callable(self.get_v):
-                    print(f"[DEBUG] vs spline already exists - skipping rebuild")
-                else:
-                    import gc
-                    gc.collect()  # Force cleanup before large allocation
-                    
-                    print(f"[DEBUG] Building vs cubic spline...")
-                    print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
-                    self.get_v = myCubicSpline(zs, self.vs, axis=0)
-                    print(f"[DEBUG]   ✓ vs spline complete")
-            
+#            if make_v and self.vs is not None:
+            self.get_v = myCubicSpline(zs, self.vs, axis=0)
+#            else:
+#                import gc
+#                gc.collect()  # Force cleanup before large allocation
+#                
+#                print(f"[DEBUG] Building vs cubic spline...")
+#                print(f"[DEBUG]   vs: {self.vs.nbytes/1e6:.2f} MB")
+#                self.get_v = myCubicSpline(zs, self.vs, axis=0)
+#                print(f"[DEBUG]   ✓ vs spline complete")
+
             print(f"\n[DEBUG] ✓✓✓ NUMPY backend splines ALL COMPLETE ✓✓✓")
             print(f"{'='*70}\n")
 
@@ -1044,7 +1042,7 @@ class Propagator:
         char_tag: str | None = None,
         save: bool = True,
         verbose: bool = True,
-        catch_exceptions=(FileNotFoundError, OSError),
+        catch_exceptions=(FileNotFoundError, OSError, meshio._exceptions.ReadError),
     ):
         """
         Try loading cached propagator data; if unavailable, run characterize(...).
@@ -1183,8 +1181,8 @@ class Propagator:
         mesh = self.generate_mesh() if self.mesh is None else self.mesh
         if z == 0:
             return copy.deepcopy(mesh)
-        return self.wvg.transform_mesh(mesh, 0, z)
-
+        return self.wvg.transform_mesh(copy.deepcopy(mesh), 0, z)
+    
     # =========================================================================
     # Field construction helpers
     # =========================================================================
@@ -1470,14 +1468,18 @@ class ChainPropagator(Propagator):
             self.z_breaks.append(p.zs[-1])
 
         p0 = propagators[0]
-        self.wl      = p0.wl
-        self.wvg     = p0.wvg
-        self.Nmax    = p0.Nmax
-        self.skipped_modes = p0.skipped_modes
-        self.mesh    = p0.mesh
+        self.wl   = p0.wl
+        self.Nmax = p0.Nmax
+        self.skipped_modes = []
         self.xp      = get_xp()
         self.backend = get_backend()
         self.zs      = self.xp.concatenate([p.zs for p in propagators])
+
+        # No single shared mesh/wvg for a chain — each segment owns its own.
+        # Accessing these directly on a ChainPropagator is a bug; force it
+        # to fail loudly instead of silently using propagators[0]'s geometry.
+        self.mesh = None
+        self.wvg  = None
 
     def get_v(self, z):
         return self.get_prop(z).get_v(z)
