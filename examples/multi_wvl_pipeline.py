@@ -46,15 +46,15 @@ from batch_propagation_pipeline import (
     N_SIGNALS,
 )
 
-default_degenetate_groups_front = {}
-default_degenetate_groups_back = {}
+default_degenerate_groups_front = {}
+default_degenerate_groups_back = {}
 default_skipped_modes_front = {}
 default_skipped_modes_back = {}
 
-default_degenetate_groups_front[3] = [[1,2],[3,4],[6,7],[8,9],[10,11],[12,13],[15,16]]
-default_degenetate_groups_back[3] = [[i for i in range(20) if i != 18]]
-default_skipped_modes_front[3] = [18]
-default_skipped_modes_back[3] = [18]
+default_degenerate_groups_front[3] = [[1,2],[3,4],[6,7],[8,9],[10,11],[12,13],[15,16]]
+default_degenerate_groups_back[3] = [[i for i in range(20) if i != 18]]
+default_skipped_modes_front[3] = {18}
+default_skipped_modes_back[3] = {18}
 
 # =====================================================================
 # LAYER 1: PER-WAVELENGTH LANTERN CONSTRUCTION
@@ -187,6 +187,117 @@ def _load_or_characterize(
         if verbose:
             print(f"    [{tag}] characterization complete and cached.")
 
+# =====================================================================
+# DISPERSION MODEL: Sellmeier-based neff scaling
+# =====================================================================
+
+def sellmeier_n_silica(wavelength_um: float) -> float:
+    """
+    Refractive index of fused silica (Malitson 1965 Sellmeier fit).
+
+    Parameters
+    ----------
+    wavelength_um : float
+        Wavelength in micrometres (e.g. 0.800 for 800 nm).
+
+    Returns
+    -------
+    n : float
+        Refractive index at the given wavelength.
+    """
+    l2 = wavelength_um ** 2
+    n2 = (1.0
+          + 0.6961663 * l2 / (l2 - 0.0684043 ** 2)
+          + 0.4079426 * l2 / (l2 - 0.1162414 ** 2)
+          + 0.8974794 * l2 / (l2 - 9.896161  ** 2))
+    return float(np.sqrt(n2))
+
+
+def scale_params_to_wavelength(
+    base_params: dict,
+    wavelength_nm: float,
+    ref_wavelength_nm: Optional[float] = None,
+) -> dict:
+    """
+    Return a copy of *base_params* with refractive indices and the
+    focal-plane pixel scale updated for *wavelength_nm* using the
+    Sellmeier equation for fused silica (Malitson 1965).
+
+    This implements a first-order dispersion model that avoids a full
+    FEM re-characterisation at every wavelength:
+
+      neff(λ) ≈ n_clad(λ) + Δn₀ · [n_core(λ) − n_clad(λ)] / Δn₀_ref
+
+    where  Δn₀ = neff_ref − n_clad_ref  is the modal-field offset at the
+    reference wavelength.  The approximation is valid when the mode profile
+    does not change dramatically with wavelength (i.e. well above cutoff).
+    Near-cutoff modes (the highest-order modes of a 19-port lantern near
+    960 nm) will be less accurate; use a full FEM characterisation there.
+
+    The focal-plane pixel scale is also updated: Δξ ∝ λ (Fraunhofer
+    diffraction), so pixel_scale_um(λ) = pixel_scale_um(λ₀) · λ/λ₀.
+
+    Parameters
+    ----------
+    base_params : dict
+        Output of get_simulation_parameters(). Must contain at minimum:
+        ``nclad``, ``ncore``, ``njack``, ``pixel_scale_um``,
+        ``wavelength_nm``.
+    wavelength_nm : float
+        Target wavelength in nanometres.
+    ref_wavelength_nm : float or None
+        Reference wavelength (the one whose full FEM characterisation
+        exists on disk).  Defaults to base_params["wavelength_nm"].
+
+    Returns
+    -------
+    p_lambda : dict
+        Updated parameter dict.  Keys changed:
+        ``wl``, ``wavelength_nm``, ``nclad``, ``ncore``, ``njack``,
+        ``pixel_scale_um``.
+    """
+    if ref_wavelength_nm is None:
+        ref_wavelength_nm = float(base_params["wavelength_nm"])
+
+    wl_um     = wavelength_nm     / 1000.0
+    ref_wl_um = ref_wavelength_nm / 1000.0
+
+    # ----------------------------------------------------------------
+    # Sellmeier indices at reference and target wavelengths
+    # ----------------------------------------------------------------
+    n_sil_ref = sellmeier_n_silica(ref_wl_um)
+    n_sil_tgt = sellmeier_n_silica(wl_um)
+
+    # Silica index shift between reference and target wavelengths.
+    # Used to rescale all three material indices (cladding, core, jacket)
+    # since they are all doped-silica variants whose Sellmeier curves
+    # track pure silica to first order.
+    delta_n_sil = n_sil_tgt - n_sil_ref
+
+    p_lambda = dict(base_params)
+
+    # ----------------------------------------------------------------
+    # Update material indices
+    # ----------------------------------------------------------------
+    p_lambda["wl"]           = wl_um
+    p_lambda["wavelength_nm"] = wavelength_nm
+
+    p_lambda["nclad"] = base_params["nclad"] + delta_n_sil
+    p_lambda["ncore"] = base_params["ncore"] + delta_n_sil
+    p_lambda["njack"] = base_params["njack"] + delta_n_sil
+
+    # Recompute derived per-material lists that copy the scalar value.
+    n_core_new = p_lambda["ncore"]
+    p_lambda["ncores"] = [n_core_new] * len(base_params["ncores"])
+
+    # ----------------------------------------------------------------
+    # Scale focal-plane pixel size with wavelength (Fraunhofer: Δξ ∝ λ)
+    # ----------------------------------------------------------------
+    p_lambda["pixel_scale_um"] = (
+        base_params["pixel_scale_um"] * (wavelength_nm / ref_wavelength_nm)
+    )
+
+    return p_lambda
 
 def build_and_characterize_lantern_at_wavelength(
     base_params: dict,
@@ -248,8 +359,12 @@ def build_and_characterize_lantern_at_wavelength(
     prop12   : ChainPropagator
     """
     p_lambda = dict(base_params)
-    p_lambda["wl"] = wavelength_nm / 1000.0
-    p_lambda["wavelength_nm"] = wavelength_nm
+    p_lambda = scale_params_to_wavelength(base_params, wavelength_nm)
+
+#    p_lambda["wl"] = wavelength_nm / 1000.0
+#    p_lambda["wavelength_nm"] = wavelength_nm
+#    ref_wl_nm = base_params.get("wavelength_nm", 800.0)
+#    p_lambda["pixel_scale_um"] = base_params["pixel_scale_um"] * (wavelength_nm / ref_wl_nm)
 
     z_ex = p_lambda["z_ex"]
     _z_split = z_split if z_split is not None else z_ex / 2.0
@@ -259,17 +374,17 @@ def build_and_characterize_lantern_at_wavelength(
 
     PL_N = PL_N if PL_N is not None else build_lantern_geometry(p_lambda)
 
-    _skipped = skipped_modes if skipped_modes is not None else [18]
-    _degen_front = degen_groups if degen_groups is not None else default_degenetate_groups_front[base_params["nrings"]]
-    _degen_back = [[i for i in range(n_modes) if i not in _skipped]]
+    _skipped_set = set(skipped_modes) if skipped_modes is not None else {18}
+    _degen_front = degen_groups if degen_groups is not None else default_degenerate_groups_front[base_params["nrings"]]
+    _degen_back = [[i for i in range(n_modes) if i not in _skipped_set]]
 
     prop1 = Propagator(p_lambda["wl"], PL_N, n_modes)
     prop1.degen_groups = _degen_front
-    prop1.skipped_modes = _skipped
+    prop1.skipped_modes = _skipped_set
     _load_or_characterize(prop1, f"{tag}_front", 0.0, _z_split, verbose=verbose)
 
     prop2 = Propagator(p_lambda["wl"], PL_N, n_modes)
-    prop2.skipped_modes = _skipped
+    prop2.skipped_modes = _skipped_set
     prop2.degen_groups = _degen_back
     # Must happen before load/characterize: the back segment's initial
     # eigenbasis is bootstrapped from the front segment's final one,
@@ -504,15 +619,18 @@ class MultiWavelengthPropagationPipeline:
             u0_batch = engine.pipeline.generate_batch_modal_coefficients(
                 aberration_coeff_batch, use_gpu=use_gpu, chunk_size=gen_chunk_size,
             )
-            uf_batch, _, _ = engine.pipeline.propagate_batch(
-                u0_batch, chunk_size=prop_chunk_size,
-            )
-            # Single-mode-per-fiber assumption: fiber flux is just the
-            # per-mode coefficient for that fiber's mode index. No
-            # coherent multi-mode sum needed within a fiber. If a fiber
-            # ever carries >1 mode, replace this line with a coherent sum
-            # over that fiber's mode indices before storing.
-            spectra_complex[i, :, :] = uf_batch[:, :self.n_fibers]
+
+            uf_batch, _, _ = engine.pipeline.propagate_batch(u0_batch, chunk_size=prop_chunk_size)
+            # Convert from FEM-eigenmode basis to per-core channel basis
+            uf_channel = np.array([engine.prop12.to_channel_basis(uf_batch[k]) for k in range(uf_batch.shape[0])])
+
+            _skipped_set = set(engine.prop12.skipped_modes)  # {18}
+            active_modes = [i for i in range(engine.prop12.Nmax) if i not in _skipped_set][:self.n_fibers]
+
+
+            spectra_complex[i, :, :] = np.abs(uf_channel[:, :self.n_fibers])  # or use active_modes
+            # alternative
+            # spectra_complex[i, :, :] = uf_batch[:, active_modes]
 
             if not self.cache_engines:
                 # Drop the heavy per-wavelength state (mesh, mode-field
@@ -525,6 +643,18 @@ class MultiWavelengthPropagationPipeline:
                 _force_release_memory()
 
         return spectra_complex
+
+    @staticmethod
+    def interpolate_power_spectra(
+        power_native: np.ndarray,        # real, shape (n_wl_native, n_fields, n_fibers)
+        wl_native_nm: np.ndarray,
+        wl_output_nm: np.ndarray,
+    ) -> np.ndarray:
+        n_wl, n_fields, n_fibers = power_native.shape
+        flat = power_native.reshape(n_wl, -1)
+        out = np.array([np.interp(wl_output_nm, wl_native_nm, flat[:, k])
+                        for k in range(flat.shape[1])]).T
+        return out.reshape(len(wl_output_nm), n_fields, n_fibers)
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -613,17 +743,12 @@ class MultiWavelengthPropagationPipeline:
             gen_chunk_size=gen_chunk_size, prop_chunk_size=prop_chunk_size,
         )
 
+        power_native = np.abs(spectra_complex) ** 2
         if output_wavelengths_nm is None:
-            wl_output_nm = self.native_wavelengths_nm
-        else:
-            wl_output_nm = np.asarray(output_wavelengths_nm, dtype=np.float64)
-            spectra_complex = self.interpolate_complex_spectra(
-                spectra_complex, self.native_wavelengths_nm, wl_output_nm,
-            )
+            return power_native, self.native_wavelengths_nm
 
-        power_spectra = np.abs(spectra_complex) ** 2
-        return power_spectra, wl_output_nm
-
+        wl_output_nm = np.asarray(output_wavelengths_nm, dtype=np.float64)
+        return self.interpolate_power_spectra(power_native, self.native_wavelengths_nm, wl_output_nm), wl_output_nm
 
 # =====================================================================
 # LAYER 3: GLUE INTO THE SPECTRAL EXTRACTION MODULE

@@ -61,15 +61,15 @@ DEFAULT_SUBPIXEL_N      = 5
 N_SIGNALS = 19
 N_RINGS = 3
 
-default_degenetate_groups_front = {}
-default_degenetate_groups_back = {}
+default_degenerate_groups_front = {}
+default_degenerate_groups_back = {}
 default_skipped_modes_front = {}
 default_skipped_modes_back = {}
 
-default_degenetate_groups_front[3] = [[1,2],[3,4],[6,7],[8,9],[10,11],[12,13],[15,16]]
-default_degenetate_groups_back[3] = [[i for i in range(20) if i != 18]]
-default_skipped_modes_front[3] = [18]
-default_skipped_modes_back[3] = [18]
+default_degenerate_groups_front[3] = [[1,2],[3,4],[6,7],[8,9],[10,11],[12,13],[15,16]]
+default_degenerate_groups_back[3] = [[i for i in range(20) if i != 18]]
+default_skipped_modes_front[3] = {18}
+default_skipped_modes_back[3] = {18}
 
 
 def diagnose_input_psf(pipeline):
@@ -339,7 +339,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
 
     wavelength_nm = wavelength_um * 1000.0
     scaling_factor = wavelength_um / DEFAULT_WAVELENGTH_UM
-    scaling_factor = 1.0
+    # scaling_factor = 1.0
 
     params = {
         "nrings":        nrings,
@@ -388,7 +388,7 @@ def build_and_characterize_lantern(p):
     )
 
     prop1 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)
-    prop1.degen_groups  = default_degenetate_groups_front[p["nrings"]]
+    prop1.degen_groups  = default_degenerate_groups_front[p["nrings"]]
     prop1.skipped_modes = default_skipped_modes_front[p["nrings"]]
 
     cache_prefix = "port"
@@ -401,7 +401,7 @@ def build_and_characterize_lantern(p):
     #prop1.load(tag)
 
     prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)    
-    prop2.degen_groups  = default_degenetate_groups_back[p["nrings"]]
+    prop2.degen_groups  = default_degenerate_groups_back[p["nrings"]]
     prop2.skipped_modes = default_skipped_modes_back[p["nrings"]]
 
     prop2.load_init_conds(prop1)
@@ -458,13 +458,36 @@ class ModalProjector:
         self.projection_matrix = modes.conj() * areas
 
     def project_batch(self, E_batch):
+        """
+        Project a batch of mesh-sampled electric fields onto the mode basis.
+
+        Returns
+        -------
+        u0_batch : array, shape (n_fields, n_modes)
+            Raw (un-normalised) overlap integrals  ⟨vₖ | E⟩.
+            The L2 norm of this vector is the total amplitude coupled into
+            the tracked modes; dividing by it would destroy the information
+            about how much light missed the waveguide entirely, which is
+            useful for diagnosing coupling efficiency and is needed so that
+            the power spectra at different wavelengths are physically
+            comparable.  Callers that need a normalised initial condition
+            (e.g. for a purely-modal propagation sanity check) should divide
+            by  xp.linalg.norm(u0_batch, axis=1, keepdims=True) themselves.
+        coupling_efficiency : array, shape (n_fields,)
+            L2 norm of each projected vector before any normalisation.
+            Values close to 1.0 mean nearly all pupil power coupled into the
+            tracked modes; values << 1.0 flag misalignment or scale problems.
+        """
         u0_batch = E_batch @ self.projection_matrix.T
-        norms    = self.xp.linalg.norm(u0_batch, axis=1, keepdims=True)
+        coupling_efficiency = self.xp.linalg.norm(u0_batch, axis=1)
+        # Avoid division by zero for all-zero inputs (e.g. a masked-out field).
+        safe_norms = coupling_efficiency[:, None]
         if self.xp is np:
-            norms[norms == 0] = 1.0
+            safe_norms = np.where(safe_norms == 0, 1.0, safe_norms)
         else:
-            norms = self.xp.where(norms == 0, 1.0, norms)
-        return u0_batch / norms
+            safe_norms = self.xp.where(safe_norms == 0, 1.0, safe_norms)
+        return u0_batch / safe_norms, coupling_efficiency
+
 
 class IncidentFieldGenerator:
     """Fixed version with correct centering and axis mapping."""
@@ -811,7 +834,7 @@ class BatchPropagationPipeline:
         else:
             E_lantern = fg.apply_ef_to_lantern(Ef_input)
         Ef_focal_mesh   = fg.resample_to_mesh(E_lantern)
-        u0_chunk = proj.project_batch(Ef_focal_mesh)
+        u0_chunk, eff = proj.project_batch(Ef_focal_mesh)
         return np.asarray(u0_chunk)
 
     # ------------------------------------------------------------------
