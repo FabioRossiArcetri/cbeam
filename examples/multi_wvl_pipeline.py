@@ -626,13 +626,22 @@ class MultiWavelengthPropagationPipeline:
 
             uf_batch, _, _ = engine.pipeline.propagate_batch(u0_batch, chunk_size=prop_chunk_size)
             # Convert from FEM-eigenmode basis to per-core channel basis
-            uf_channel = np.array([engine.prop12.to_channel_basis(uf_batch[k]) for k in range(uf_batch.shape[0])])
 
             _skipped_set = set(engine.prop12.skipped_modes)  # {18}
             active_modes = [i for i in range(engine.prop12.Nmax) if i not in _skipped_set][:self.n_fibers]
 
+            # shape (n_fields, n_modes) → (n_fields, n_fibers) in per-core order
+            uf_channel = np.stack([
+                engine.prop12.to_channel_basis(uf_batch[k])
+                for k in range(uf_batch.shape[0])
+            ])
 
-            spectra_complex[i, :, :] = np.abs(uf_channel[:, :self.n_fibers])  # or use active_modes
+
+            spectra_complex[i, :, :] = uf_channel[:, :self.n_fibers]  # or active_modes slice
+
+            #uf_channel = np.array([engine.prop12.to_channel_basis(uf_batch[k]) for k in range(uf_batch.shape[0])])
+
+            #spectra_complex[i, :, :] = np.abs(uf_channel[:, :self.n_fibers])  # or use active_modes
             # alternative
             # spectra_complex[i, :, :] = uf_batch[:, active_modes]
 
