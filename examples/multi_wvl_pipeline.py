@@ -374,17 +374,21 @@ def build_and_characterize_lantern_at_wavelength(
 
     PL_N = PL_N if PL_N is not None else build_lantern_geometry(p_lambda)
 
-    _skipped_set = set(skipped_modes) if skipped_modes is not None else {18}
+
+
+    _skipped = list(skipped_modes) if skipped_modes is not None else [18]
+    _skipped_set = set(_skipped)   # used only for active_modes computation below
+
     _degen_front = degen_groups if degen_groups is not None else default_degenerate_groups_front[base_params["nrings"]]
     _degen_back = [[i for i in range(n_modes) if i not in _skipped_set]]
 
     prop1 = Propagator(p_lambda["wl"], PL_N, n_modes)
     prop1.degen_groups = _degen_front
-    prop1.skipped_modes = _skipped_set
+    prop1.skipped_modes = _skipped
     _load_or_characterize(prop1, f"{tag}_front", 0.0, _z_split, verbose=verbose)
 
     prop2 = Propagator(p_lambda["wl"], PL_N, n_modes)
-    prop2.skipped_modes = _skipped_set
+    prop2.skipped_modes = _skipped
     prop2.degen_groups = _degen_back
     # Must happen before load/characterize: the back segment's initial
     # eigenbasis is bootstrapped from the front segment's final one,
@@ -742,13 +746,25 @@ class MultiWavelengthPropagationPipeline:
             aberration_coeff_batch, use_gpu=use_gpu,
             gen_chunk_size=gen_chunk_size, prop_chunk_size=prop_chunk_size,
         )
-
         power_native = np.abs(spectra_complex) ** 2
+
         if output_wavelengths_nm is None:
             return power_native, self.native_wavelengths_nm
 
         wl_output_nm = np.asarray(output_wavelengths_nm, dtype=np.float64)
-        return self.interpolate_power_spectra(power_native, self.native_wavelengths_nm, wl_output_nm), wl_output_nm
+        if wl_output_nm.min() < self.native_wavelengths_nm.min() or \
+        wl_output_nm.max() > self.native_wavelengths_nm.max():
+            print("[MultiWavelength] WARNING: output grid extends beyond native range.")
+
+        n_wl_native, n_fields, n_fibers = power_native.shape
+        n_wl_out = len(wl_output_nm)
+        flat = power_native.reshape(n_wl_native, -1)
+        flat_out = np.array([
+            np.interp(wl_output_nm, self.native_wavelengths_nm, flat[:, k])
+            for k in range(flat.shape[1])
+        ]).T
+        power_spectra = flat_out.reshape(n_wl_out, n_fields, n_fibers)
+        return power_spectra, wl_output_nm
 
 # =====================================================================
 # LAYER 3: GLUE INTO THE SPECTRAL EXTRACTION MODULE
