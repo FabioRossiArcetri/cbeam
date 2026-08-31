@@ -33,6 +33,8 @@ from scipy.optimize import linear_sum_assignment
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.patches import RegularPolygon
 
+from wavesolve.fe_solver import construct_B
+
 backend = get_backend()
 default_chunk_size = 10000
 default_gen_chunk_size = 1000
@@ -365,6 +367,11 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     params["rcores"] = [params["rcore"]] * params["n_output_positions"]
     params["ncores"] = [params["ncore"]] * params["n_output_positions"]
     
+    psf_fill_factor=0.85
+    grid_size = DEFAULT_GRID_RESOLUTION          # 400 px  (ifunc pupil grid)
+    r_airy_px = 1.22 * params["pad_factor"] * grid_size / 2.0
+    params["pixel_scale_um"] = psf_fill_factor * params["rclad"] / r_airy_px
+
     return params
 
 
@@ -433,7 +440,9 @@ def get_waveguide_properties(prop12, mesh_z=0):
 
     n_modes   = active_modes.shape[0]
     points_2d = np.stack((mesh_obj.points[:, 0], mesh_obj.points[:, 1]), axis=-1)
-    
+        
+    B     = construct_B(mesh_obj, sparse=True)
+    areas = np.array(B.diagonal())
     return {
         'mesh':          mesh_obj,
         'mesh_areas':    areas,

@@ -128,6 +128,10 @@ class Propagator:
         self.get_v                = None
         self.points0              = None
         self.channel_basis_matrix = None
+        
+        self._channel_basis_z     = None
+        self._channel_basis_tol   = 1e-9
+        
         self.meshpoints           = None
 
         self.save_dir = './data' if save_dir is None else save_dir
@@ -868,6 +872,7 @@ class Propagator:
         self.zs    = self.xp.load(self.save_dir + '/zvals/zvals'             + ps + '.npy')
         if self.Nmax is None:
             self.Nmax = len(self.neffs[0])
+        self._channel_basis_z     = None
         self.channel_basis_matrix = None
         self._splines_ready       = False   # force rebuild after load
 
@@ -963,27 +968,65 @@ class Propagator:
         oldbasis = self.get_v(z)
         cob = self.inner_product(newbasis, oldbasis, B)
         self.channel_basis_matrix = cob
+        self._channel_basis_z = float(z)
         if u is not None:
             return cob, self.xp.dot(cob, u)
         return cob
 
-    def compute_isolated_basis(self, z=None):
-        if z is None:
-            z = self.zs[-1]
+    def _compute_isolated_basis_at_z(self, z):
         m       = self.make_mesh_at_z(z)
         self.wvg.assign_IOR()
         wvg_dim = len(self.wvg.prim3Dgroups[-1])
-        _v      = self.xp.zeros((wvg_dim, m.points.shape[0]))
+        npts    = m.points.shape[0]
+        _v      = self.xp.zeros((wvg_dim, npts), dtype=self.xp.complex128)
         for i in range(wvg_dim):
-            _dict        = self.wvg.isolate(i)
-            _wi, _vi, _Ni = solve_waveguide(m, self.wl, _dict, sparse=True, Nmax=1)
-            if self.xp.sum(_vi) < 0:
+            _dict = self.wvg.isolate(i)
+            try:
+                _wi, _vi, _Ni = solve_waveguide(m, self.wl, _dict, sparse=True, Nmax=1)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"isolated-basis solve failed for channel {i} at z={z}"
+                ) from exc
+            _vi = self.xp.ravel(self.xp.asarray(_vi))
+            if _vi.shape[0] != npts:
+                raise RuntimeError(
+                    f"isolated-basis shape mismatch at z={z}: "
+                    f"got {_vi.shape[0]} points, expected {npts}"
+                )
+            if float(self.xp.real(self.xp.sum(_vi))) < 0.0:
                 _vi *= -1
             _v[i, :] = _vi
         return _v
 
+    def compute_isolated_basis(self, z=None):
+        if z is None:
+            z = self.zs[-1]
+        try:
+            return self._compute_isolated_basis_at_z(z)
+        except Exception as exc_primary:
+            z_fallback = self.zs[-1] if self.zs is not None else z
+            if abs(float(z_fallback) - float(z)) <= self._channel_basis_tol:
+                raise
+            try:
+                print(
+                    f"isolated-basis failed at z={z}; retrying at z={z_fallback} "
+                    f"(output end)"
+                )
+                return self._compute_isolated_basis_at_z(z_fallback)
+            except Exception as exc_fallback:
+                raise RuntimeError(
+                    f"isolated-basis failed at z={z} and fallback z={z_fallback}"
+                ) from exc_fallback
+
     def to_channel_basis(self, uf, z=None):
-        if self.channel_basis_matrix is None:
+        if z is None:
+            z = self.zs[-1]
+        need_rebuild = (
+            self.channel_basis_matrix is None
+            or self._channel_basis_z is None
+            or abs(float(z) - float(self._channel_basis_z)) > self._channel_basis_tol
+        )
+        if need_rebuild:
             _v = self.compute_isolated_basis(z)
             self.compute_change_of_basis(_v, z)
         return self.xp.dot(self.channel_basis_matrix, uf)
@@ -1057,7 +1100,7 @@ class Propagator:
             u0[:] = 0.
             u0[j] = 1.
             zs, us, uf = self.propagate(u0, zi, zf)
-            out = self.to_channel_basis(uf) if channel_basis else uf
+            out = self.to_channel_basis(uf, z=zf) if channel_basis else uf
             M   = len(out)
             mat[:M, j] = out
         return mat
