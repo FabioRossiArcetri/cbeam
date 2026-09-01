@@ -182,6 +182,9 @@ class Propagator:
         """Apply the e^{i beta_j z} phase to mode amplitudes."""
         if zi is None:
             zi = self.zs[0]
+        # u may arrive as a python list; ``list * jax_array`` raises (numpy would
+        # broadcast).  Coerce first so both backends behave the same.
+        u = self.xp.asarray(u)
         phase = self.xp.exp(
             1.j * self.k * self.xp.array(self.get_int_neff(z) - self.get_int_neff(zi))
         )
