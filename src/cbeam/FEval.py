@@ -1,6 +1,7 @@
 from juliacall import Main as jl
 from .backend import get_xp
 import os, cbeam
+import numpy as _np
 
 from juliacall import Main as jl
 
@@ -8,6 +9,15 @@ from juliacall import Main as jl
 jl.seval("using Pkg")
 Pkg = jl.Pkg
 xp = get_xp()
+
+
+def _host(a, dtype=None):
+    """Coerce an array (possibly a JAX device array) to a contiguous host numpy
+    array before handing it to Julia.  PythonCall wraps a numpy ndarray as a
+    zero-copy ``PyArray``; a JAX array instead arrives as ``PyIterable{Any}``
+    and fails method dispatch in FEval.jl."""
+    a = _np.asarray(a) if dtype is None else _np.asarray(a, dtype=dtype)
+    return _np.ascontiguousarray(a)
 
 # ===== ADD THIS: Load the FEval Julia module =====
 _cbeam_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +41,8 @@ def query(point,tree):
     return jl_idx-1
 
 def evaluate(point,field,tree):
+    point = _host(point, dtype=_np.float64)
+    field = _host(field, dtype=_np.float64)
     if point.ndim == 2:
         return xp.array(jl.FEval.evaluate(point[:,:2], field, tree))
     return xp.array(jl.FEval.evaluate(point, field, tree))
@@ -49,6 +61,9 @@ def evaluate_func(field, tree):
     return jl.FEval.evaluate_func(field, tree)
 
 def transverse_gradient(field, tris, points):
+    field  = _host(field, dtype=_np.float64)
+    tris   = _host(tris)
+    points = _host(points, dtype=_np.float64)
     return xp.array(jl.FEval.transverse_gradient(field, tris, points))
 
 def get_triangles(mesh):

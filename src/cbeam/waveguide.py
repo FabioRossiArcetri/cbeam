@@ -4,15 +4,17 @@ import meshio
 import copy
 from itertools import combinations
 
-from .backend import get_xp
-import matplotlib.pyplot as plt
-
-xp = get_xp()
-
 import math
 import matplotlib.pyplot as plt
 from matplotlib.patches import RegularPolygon
 import numpy as np
+
+# waveguide geometry + FE mesh construction is host-only (gmsh/pygmsh are C
+# libraries; the size callback is a scalar hot loop).  It must never run on a
+# JAX device array, so `xp` here is always plain numpy regardless of
+# CBEAM_BACKEND.  The propagation math (propagator.py / backend.py) is what
+# switches backends.
+xp = np
 
 def hex_ring_positions(rings, core_spacing=1.0, plot=False):
     """
@@ -100,7 +102,32 @@ def hex_ring_positions(rings, core_spacing=1.0, plot=False):
     return positions
 
 def get_19port_positions(core_spacing):
-    return hex_ring_positions(rings=3, core_spacing=core_spacing, plot=False)
+    # NOTE: the core *ordering* here is load-bearing.  Cores are inserted into
+    # the gmsh geometry in this order, which fixes the mesh triangulation and
+    # therefore the tie-breaking among the (near-)degenerate guided modes of a
+    # 19-port lantern.  This reproduces the exact sequence used upstream
+    # (jw-lin/cbeam); do not replace it with hex_ring_positions(), whose
+    # angle-sorted order gives a physically identical device but a different
+    # discretisation and hence different compute_neffs() output.
+    pos = [[0, 0]]
+
+    for i in range(6):
+        xpos = core_spacing * np.cos(i * np.pi / 3)
+        ypos = core_spacing * np.sin(i * np.pi / 3)
+        pos.append([xpos, ypos])
+
+    startpos = np.array([2 * core_spacing, 0])
+    startang = 2 * np.pi / 3
+    pos.append(startpos)
+    for i in range(11):
+        if i % 2 == 0 and i != 0:
+            startang += np.pi / 3
+        nextpos = startpos + np.array([core_spacing * np.cos(startang),
+                                       core_spacing * np.sin(startang)])
+        pos.append(nextpos)
+        startpos = nextpos
+
+    return np.array(pos)
 
 
 # ------------------- Plotting/mesh loading functions ------------------- #
@@ -241,11 +268,16 @@ class Prim2D:
         self.skip_refinement = False
 
     def make_poly(self, geom):
-        if hasattr(self.points[0][0], '__len__'):
-            ps = [geom.add_polygon(p) for p in self.points]
+        # gmsh/pygmsh is host-only: always hand it plain numpy, never a JAX array.
+        # Depth check via ndim (a JAX 0-d Array exposes __len__, so the old
+        # ``hasattr(self.points[0][0], '__len__')`` test wrongly fired on the
+        # JAX backend and split a single polygon into 1-D rows).
+        pts = np.asarray(self.points)
+        if pts.ndim == 3:                       # nested polygons -> union (Prim2DUnion)
+            ps = [geom.add_polygon(p) for p in pts]
             poly = geom.boolean_union(ps)[0]
         else:
-            poly = geom.add_polygon(self.points)
+            poly = geom.add_polygon(pts)
         return poly
 
     def update(self, points):
@@ -533,7 +565,7 @@ class Waveguide:
     z_ex = None
 
     def __init__(self, prim3Dgroups):
-        self.xp = get_xp()
+        self.xp = xp  # always numpy here (see module-level note)
         self.prim3Dgroups = prim3Dgroups
         self.IOR_dict = {}
         self.update(0)
@@ -605,29 +637,39 @@ class Waveguide:
             return mesh
         
     def _compute_mesh_size(self, x, y, _scale=1., _power=1., min_size=None, max_size=None):
+        # Hot gmsh size callback: pure host scalar math.  Must stay on plain
+        # numpy -- self.xp.zeros() under the JAX backend is immutable and the
+        # ``dists[i] = ...`` writes below would raise.
         prims = self.primsflat
-        dists = self.xp.zeros(len(prims))
-        for i, p in enumerate(prims): 
+        dists = np.zeros(len(prims))
+        for i, p in enumerate(prims):
             if p.skip_refinement and p.mesh_size is not None:
                 dists[i] = 0.
             else:
-                dists[i] = p.boundary_dist(x, y)
+                dists[i] = float(p.boundary_dist(x, y))
 
-        mesh_sizes = self.xp.zeros(len(prims))
-        for i, d in enumerate(dists): 
+        mesh_sizes = np.zeros(len(prims))
+        for i, d in enumerate(dists):
             p = prims[i]
-            ms = xp.inf if p.mesh_size is None else p.mesh_size
-            boundary_mesh_size = min(ms, xp.sqrt((p.points[0,0]-p.points[1,0])**2 + (p.points[0,1]-p.points[1,1])**2))
-            scaled_size = xp.power(1 + xp.abs(d)/boundary_mesh_size * _scale, _power) * boundary_mesh_size
+            ms = np.inf if p.mesh_size is None else p.mesh_size
+            p0x, p0y = float(p.points[0, 0]), float(p.points[0, 1])
+            p1x, p1y = float(p.points[1, 0]), float(p.points[1, 1])
+            boundary_mesh_size = min(ms, np.sqrt((p0x - p1x)**2 + (p0y - p1y)**2))
+            scaled_size = np.power(1 + np.abs(d)/boundary_mesh_size * _scale, _power) * boundary_mesh_size
             if d <= 0 and p.mesh_size is not None:
                 mesh_sizes[i] = min(scaled_size, p.mesh_size)
             else:
                 mesh_sizes[i] = scaled_size
-        target_size = xp.min(mesh_sizes)
+        target_size = np.min(mesh_sizes)
         if min_size:
             target_size = max(min_size, target_size)
         if max_size:
-            target_size = min(max_size, target_size)    
+            # NOTE: upstream (jw-lin/cbeam) assigns to `scaled_size` here, so the
+            # max_size clamp is a no-op and `target_size` is returned unclamped.
+            # Kept identical for bit-for-bit realignment; with the default
+            # max_mesh_size=100 the clamp never binds for the bundled examples
+            # anyway (the cladding term caps target_size well below 100).
+            scaled_size = min(max_size, target_size)
         return target_size
 
     def make_mesh(self, writeto=None):

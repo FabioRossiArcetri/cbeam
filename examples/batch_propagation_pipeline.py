@@ -367,9 +367,20 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     params["rcores"] = [params["rcore"]] * params["n_output_positions"]
     params["ncores"] = [params["ncore"]] * params["n_output_positions"]
     
-    psf_fill_factor=0.85
-    grid_size = DEFAULT_GRID_RESOLUTION          # 400 px  (ifunc pupil grid)
-    r_airy_px = 1.22 * params["pad_factor"] * grid_size / 2.0
+    # Focal-plane (post-FFT) pixel scale.
+    #
+    # The pupil field is sampled on grid_size px and zero-padded to
+    # grid_size * pad_factor before fft2, so the diffraction pattern is
+    # sampled at exactly `pad_factor` px per (lambda/D).  The Airy first-null
+    # radius is therefore 1.22 * pad_factor px -- it does NOT scale with
+    # grid_size (the earlier `* grid_size / 2` term shrank pixel_scale_um by
+    # ~200x, so the padded grid only spanned +-5 um and ~2/3 of the +-27 um
+    # lantern mesh fell outside it -> "mesh points map outside FFT grid").
+    #
+    # pixel_scale_um is then fixed by requiring the Airy radius to equal
+    # psf_fill_factor * rclad in physical units.
+    psf_fill_factor = 0.85
+    r_airy_px = 1.22 * params["pad_factor"]
     params["pixel_scale_um"] = psf_fill_factor * params["rclad"] / r_airy_px
 
     return params

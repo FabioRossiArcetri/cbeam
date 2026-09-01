@@ -4,7 +4,14 @@ backend_choice = os.environ.get("CBEAM_BACKEND", "numpy").lower()
 using_jax = backend_choice == "jax"
 
 if using_jax:
-    os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+    # Grow-on-demand + return-to-driver GPU allocation.  Without this JAX
+    # preallocates ~75% of the device on first use and never gives it back, so
+    # a workload that builds/discards big arrays per iteration (e.g. the
+    # multi-wavelength lantern pipeline: characterize -> propagate -> release,
+    # one wavelength at a time) OOMs even though its steady-state footprint is
+    # small.  Respect an explicit user setting if one is already present.
+    os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as xp
@@ -104,67 +111,58 @@ def solve_ivp(fun, t_span, y0, **kwargs):
 
 class _JAXCubicSpline:
     """
-    Minimal natural cubic spline for JAX, matching the scipy.interpolate.CubicSpline
-    interface needed by the propagator: evaluation, .derivative(), .antiderivative().
+    Cubic spline for the JAX backend that mirrors the parts of
+    ``scipy.interpolate.CubicSpline`` the propagator relies on: evaluation,
+    ``.derivative()``, ``.antiderivative()``, N-d and complex output arrays.
 
-    Supports N-d output arrays via vectorisation over trailing axes.
+    To stay numerically aligned with the numpy / upstream path the knot
+    coefficients are fitted on the host with scipy (``not-a-knot`` end
+    conditions by default, ``natural`` on request); only the *evaluation* runs
+    in ``xp`` so it stays traceable/differentiable in ``z``.  Queries outside
+    ``[xs[0], xs[-1]]`` are extrapolated with the boundary-segment polynomial
+    (``extrapolate=True``, scipy's default), unless ``extrapolate=False``.
+
     ``y`` shape: (n_points, *trailing_dims)
     """
 
-    def __init__(self, xs, ys, axis=0, **kwargs):
-        ys = xp.moveaxis(xp.asarray(ys, dtype=xp.float64), axis, 0)
+    def __init__(self, xs, ys, axis=0, bc_type="not-a-knot",
+                 extrapolate=True, **kwargs):
+        ys = xp.moveaxis(xp.asarray(ys), axis, 0)
         xs = xp.asarray(xs, dtype=xp.float64)
         self.xs = xs
         self.ys = ys
         self.axis = 0
-        self._coeffs = self._fit(xs, ys)
+        self.bc_type = "natural" if bc_type == "natural" else "not-a-knot"
+        self.extrapolate = bool(extrapolate)
+        self._coeffs = self._fit(xs, ys, self.bc_type)
 
     @staticmethod
-    def _fit(xs, ys):
-        n = xs.shape[0]
-        h  = xp.diff(xs)
-        dy = xp.diff(ys, axis=0)
-
-        shape_tail = ys.shape[1:]
-
+    def _fit(xs, ys, bc_type="not-a-knot"):
         import numpy as np
-        h_np  = np.array(h)
-        dy_np = np.array(dy)
+        import scipy.interpolate as _si
 
-        m_np = np.zeros((n,) + shape_tail)
+        xs_np = np.asarray(xs, dtype=np.float64)
+        ys_np = np.asarray(ys)
+        if xs_np.shape[0] < 3 and bc_type == "not-a-knot":
+            bc_type = "natural"
 
-        if n > 2:
-            c_prime = np.zeros(n)
-            d_prime = np.zeros((n,) + shape_tail)
+        if np.iscomplexobj(ys_np):
+            cs_r = _si.CubicSpline(xs_np, ys_np.real, axis=0, bc_type=bc_type)
+            cs_i = _si.CubicSpline(xs_np, ys_np.imag, axis=0, bc_type=bc_type)
+            cc = cs_r.c + 1j * cs_i.c
+        else:
+            cc = _si.CubicSpline(xs_np, ys_np, axis=0, bc_type=bc_type).c
 
-            denom      = 2.0 * (h_np[0] + h_np[1])
-            c_prime[1] = h_np[1] / denom
-            rhs        = 3.0 * (dy_np[1] / h_np[1] - dy_np[0] / h_np[0])
-            d_prime[1] = rhs / denom
-
-            for i in range(2, n - 1):
-                denom      = 2.0 * (h_np[i-1] + h_np[i]) - h_np[i-1] * c_prime[i-1]
-                c_prime[i] = h_np[i] / denom
-                rhs        = 3.0 * (dy_np[i] / h_np[i] - dy_np[i-1] / h_np[i-1])
-                d_prime[i] = (rhs - h_np[i-1] * d_prime[i-1]) / denom
-
-            m_np[n-2] = d_prime[n-2]
-            for i in range(n-3, 0, -1):
-                m_np[i] = d_prime[i] - c_prime[i] * m_np[i+1]
-
-        m = xp.array(m_np)
-
-        sl = tuple([slice(None)] + [None] * len(shape_tail))
-        a  = ys[:-1]
-        b  = dy / h[sl] - h[sl] * (2 * m[:-1] + m[1:]) / 3
-        c  = m[:-1]
-        d  = (m[1:] - m[:-1]) / (3 * h[sl])
-        return a, b, c, d
+        # scipy stores cc[k] as the coefficient of (x - x_i)**(3 - k); the
+        # evaluator below expects a + b*dx + c*dx**2 + d*dx**3.
+        return (xp.asarray(cc[3]), xp.asarray(cc[2]),
+                xp.asarray(cc[1]), xp.asarray(cc[0]))
 
     def _eval(self, z, coeffs):
         a, b, c, d = coeffs
         xs = self.xs
-        z  = xp.clip(z, xs[0], xs[-1])
+        if not self.extrapolate:
+            z = xp.clip(z, xs[0], xs[-1])
         idx = xp.searchsorted(xs, z, side="right") - 1
         idx = xp.clip(idx, 0, xs.shape[0] - 2)
         dx  = z - xs[idx]
@@ -182,7 +180,7 @@ class _JAXCubicSpline:
             def __call__(self_, z):
                 b2, c2, d2, _ = deriv_coeffs
                 xs  = parent.xs
-                z_  = xp.clip(z, xs[0], xs[-1])
+                z_  = z if parent.extrapolate else xp.clip(z, xs[0], xs[-1])
                 idx = xp.searchsorted(xs, z_, side="right") - 1
                 idx = xp.clip(idx, 0, xs.shape[0] - 2)
                 dx  = z_ - xs[idx]
@@ -204,7 +202,8 @@ class _JAXCubicSpline:
             + d * h[sl] ** 4 / 4
         )
         cumulative = xp.concatenate(
-            [xp.zeros((1,) + shape_tail), xp.cumsum(seg_integrals, axis=0)], axis=0
+            [xp.zeros((1,) + shape_tail, dtype=seg_integrals.dtype),
+             xp.cumsum(seg_integrals, axis=0)], axis=0
         )
         parent = self
 
@@ -212,7 +211,7 @@ class _JAXCubicSpline:
             def __call__(self_, z):
                 a2, b2, c2, d2 = parent._coeffs
                 xs2 = parent.xs
-                z_  = xp.clip(z, xs2[0], xs2[-1])
+                z_  = z if parent.extrapolate else xp.clip(z, xs2[0], xs2[-1])
                 idx = xp.searchsorted(xs2, z_, side="right") - 1
                 idx = xp.clip(idx, 0, xs2.shape[0] - 2)
                 dx  = z_ - xs2[idx]
@@ -226,26 +225,37 @@ class _JAXCubicSpline:
 # Public interpolation helpers
 # ---------------------------------------------------------------------------
 
-def myCubicSpline(x, y, axis=0, **kwargs):
+def myCubicSpline(x, y, axis=0, bc_type="not-a-knot", extrapolate=True, **kwargs):
     if using_jax:
-        return _JAXCubicSpline(x, y, axis=axis)
+        return _JAXCubicSpline(x, y, axis=axis, bc_type=bc_type,
+                               extrapolate=extrapolate)
     else:
-        return scipy.interpolate.CubicSpline(x, y, axis=axis, **kwargs)
+        return scipy.interpolate.CubicSpline(
+            x, y, axis=axis, bc_type=bc_type, extrapolate=extrapolate, **kwargs)
 
 
 def UnivariateSpline(x, y, **kwargs):
     if using_jax:
-        return _JAXCubicSpline(x, y, axis=0)
+        # scipy's UnivariateSpline(s=0) is an interpolating cubic; the closest
+        # xp-evaluable match is a not-a-knot cubic spline.  ext=0/"extrapolate"
+        # -> polynomial extrapolation (the mode used at every call site here).
+        ext = kwargs.get("ext", 0)
+        return _JAXCubicSpline(x, y, axis=0, bc_type="not-a-knot",
+                               extrapolate=ext in (0, "extrapolate"))
     else:
         return scipy.interpolate.UnivariateSpline(x, y, **kwargs)
 
 
 def interp1d(x, y, kind="linear", axis=0, **kwargs):
     if using_jax:
-        if kind in ("cubic", 3):
-            return _JAXCubicSpline(x, y, axis=axis)
+        # cubic / quadratic -> scipy-fitted not-a-knot spline.  With exactly 3
+        # samples not-a-knot is the exact parabola, matching
+        # interp1d(kind='quadratic', fill_value='extrapolate').
+        if kind in ("cubic", 3, "quadratic", 2):
+            return _JAXCubicSpline(x, y, axis=axis, bc_type="not-a-knot",
+                                   extrapolate=True)
         x = xp.asarray(x, dtype=xp.float64)
-        y = xp.asarray(y, dtype=xp.float64)
+        y = xp.asarray(y)
 
         def interp_func(x_new):
             x_new = xp.asarray(x_new, dtype=xp.float64)

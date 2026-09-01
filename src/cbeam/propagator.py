@@ -522,7 +522,13 @@ class Propagator:
         while True:
             self.wvg.transform_mesh(mesh, 0, z, _mesh)
             if len(vs) == 0 and self.vs is not None and self.neffs is not None:
-                neff, v = self.neffs[0], self.vs[0]
+                # Bootstrap from load_init_conds().  Force a *writable* host numpy
+                # copy: the mode-tracking bookkeeping below (track_modes /
+                # correct_degeneracy / make_sign_consistent / avg_degen_neff) does
+                # in-place mutation and list indexing, which a JAX array rejects
+                # outright and a bare np.asarray() of one leaves read-only.
+                neff = np.array(self.neffs[0])
+                v    = np.array(self.vs[0])
             else:
                 w, v, N = solve_waveguide(_mesh, self.wl, IOR_dict, sparse=True, Nmax=self.Nmax)
                 neff    = get_eff_index(self.wl, w)
@@ -542,7 +548,7 @@ class Propagator:
 
             for gr in self.degen_groups:
                 self.avg_degen_neff(gr, neff)
-            v[self.skipped_modes] = 0.
+            v = self._zero_skipped(v)
 
             vdec = self.decimate(v)
             if len(vs) < 4 or fixed_step:
@@ -675,7 +681,6 @@ class Propagator:
         # =====================================================================
         if self.backend == "jax":
             import jax.numpy as jnp
-            import diffrax
 
             zs_jnp = jnp.asarray(zs, dtype=jnp.float64)
 
@@ -721,13 +726,27 @@ class Propagator:
                 self.cmats_spline = None
 
             # -----------------------------------------------------------------
-            # Eigenmodes  (complex — use diffrax Hermite interpolation)
-            # -----------------------------------------------------------------
+            # Eigenmodes  —  keep this interpolant on the HOST.
+            #
+            # get_v is only used for host-side field reconstruction / basis
+            # change (to_channel_basis, make_field, compute_change_of_basis),
+            # never inside the ODE.  Its coefficient tensor is
+            # (4, n_z, Nmodes, Npoints) complex128 — several GB for a photonic
+            # lantern — so putting it on the GPU (with front + back propagators
+            # resident at once in the multi-wavelength pipeline) is what drives
+            # the CUDA OOM.  A plain scipy CubicSpline on numpy is the same
+            # not-a-knot interpolant and costs zero device memory.
             if make_v and self.vs is not None:
-                vs_jnp   = jnp.asarray(self.vs, dtype=jnp.complex128)
-                v_coeffs = diffrax.backward_hermite_coefficients(zs_jnp, vs_jnp)
-                _spline_v = diffrax.CubicInterpolation(zs_jnp, v_coeffs)
-                self.get_v = _spline_v.evaluate
+                import scipy.interpolate as _si
+                _vs_host = np.asarray(self.vs)
+                _zs_host = np.asarray(zs)
+                try:
+                    self.get_v = _si.CubicSpline(_zs_host, _vs_host, axis=0)
+                except (ValueError, TypeError):
+                    # older scipy: no direct complex support -> fit re/im apart
+                    _csr = _si.CubicSpline(_zs_host, _vs_host.real, axis=0)
+                    _csi = _si.CubicSpline(_zs_host, _vs_host.imag, axis=0)
+                    self.get_v = lambda z, _r=_csr, _i=_csi: _r(z) + 1j * _i(z)
 
             self._splines_ready = True
 
@@ -918,9 +937,19 @@ class Propagator:
     def inner_product(self, v1, v2, B):
         return B.dot(v1.T).T.dot(v2.T)
 
+    def _zero_skipped(self, resids):
+        """Zero the rows of `resids` at `self.skipped_modes` without in-place
+        mutation, so it also works on immutable JAX arrays.  Multiplying by an
+        exact 0/1 mask is bit-identical to ``resids[skipped] = 0`` for finite
+        input."""
+        if not len(self.skipped_modes):
+            return resids
+        keep = np.ones(resids.shape[0])
+        keep[list(self.skipped_modes)] = 0.0
+        return resids * keep.reshape((-1,) + (1,) * (resids.ndim - 1))
+
     def _ref_fac_v(self, v, vlast, vi):
-        resids = v - vi
-        resids[self.skipped_modes] = 0.
+        resids = self._zero_skipped(v - vi)
         err = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
         tol = (max(self.xp.sqrt(self.xp.mean(self.xp.power(v - vlast, 2))) / 100., 1e-7)
                * self.xp.power(10., -float(self.z_acc)))
@@ -931,8 +960,7 @@ class Propagator:
         return 0
 
     def _ref_fac_n(self, ninterp, n, nlast):
-        resids = ninterp - n
-        resids[self.skipped_modes] = 0.
+        resids = self._zero_skipped(ninterp - n)
         err   = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
         nsort = sorted(nlast, reverse=True)
         tol   = (max((nsort[0] - nsort[1]) / 100., 1e-9)
@@ -978,7 +1006,10 @@ class Propagator:
         self.wvg.assign_IOR()
         wvg_dim = len(self.wvg.prim3Dgroups[-1])
         npts    = m.points.shape[0]
-        _v      = self.xp.zeros((wvg_dim, npts), dtype=self.xp.complex128)
+        # Built row-by-row from solve_waveguide (host) output -> plain numpy so
+        # the item assignment works on the JAX backend too.  Consumed host-side
+        # by compute_change_of_basis / inner_product.
+        _v      = np.zeros((wvg_dim, npts), dtype=np.complex128)
         for i in range(wvg_dim):
             _dict = self.wvg.isolate(i)
             try:
@@ -987,14 +1018,14 @@ class Propagator:
                 raise RuntimeError(
                     f"isolated-basis solve failed for channel {i} at z={z}"
                 ) from exc
-            _vi = self.xp.ravel(self.xp.asarray(_vi))
+            _vi = np.ravel(np.asarray(_vi))
             if _vi.shape[0] != npts:
                 raise RuntimeError(
                     f"isolated-basis shape mismatch at z={z}: "
                     f"got {_vi.shape[0]} points, expected {npts}"
                 )
-            if float(self.xp.real(self.xp.sum(_vi))) < 0.0:
-                _vi *= -1
+            if float(np.real(np.sum(_vi))) < 0.0:
+                _vi = -_vi
             _v[i, :] = _vi
         return _v
 

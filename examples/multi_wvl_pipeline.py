@@ -416,6 +416,19 @@ def _force_release_memory() -> None:
     assumed here.
     """
     gc.collect()
+
+    # JAX: drop compiled-executable / tracing caches and let the freed device
+    # buffers go back to the driver (works together with
+    # XLA_PYTHON_CLIENT_PREALLOCATE=false set in cbeam.backend).  No-op on the
+    # numpy backend.
+    try:
+        import jax
+        jax.clear_caches()
+    except Exception:
+        pass
+
+    gc.collect()
+
     try:
         from juliacall import Main as _jl
         _jl.GC.gc()
