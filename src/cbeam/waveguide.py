@@ -330,16 +330,43 @@ class Rectangle(Prim2D):
         cond0 = (i==0) & (bounds[2]<=y) & (y<=bounds[3])
         outx[cond0] = bounds[0]
         outy[cond0] = y[cond0]
-        cond1 = (i==1) & (bounds[2]<=y) & (y<=bounds[3])
-        outx[cond1] = bounds[1]
-        outy[cond1] = y[cond1]
-        cond2 = (i==2) & (bounds[0]<=x) & (x<=bounds[1])
-        outx[cond2] = x[cond2]
-        outy[cond2] = bounds[2]
-        cond3 = (i==3) & (bounds[0]<=x) & (x<=bounds[1])
-        outx[cond3] = x[cond3]
-        outy[cond3] = bounds[3]
-        # handle corners
+        cond1 = (i==0) & (y<bounds[2])
+        outx[cond1] = bounds[0]
+        outy[cond1] = bounds[2]
+        cond2 = (i==0) & (y>bounds[3])
+        outx[cond2] = bounds[0]
+        outy[cond2] = bounds[3]
+
+        cond3 = (i==1) & (bounds[2]<=y) & (y<=bounds[3])
+        outx[cond3] = bounds[1]
+        outy[cond3] = y[cond3]
+        cond4 = (i==1) & (y<bounds[2])
+        outx[cond4] = bounds[1]
+        outy[cond4] = bounds[2]
+        cond5 = (i==1) & (y>bounds[3])
+        outx[cond5] = bounds[1]
+        outy[cond5] = bounds[3]
+
+        cond6 = (i==2) & (bounds[0]<=x) & (x<=bounds[1])
+        outx[cond6] = x[cond6]
+        outy[cond6] = bounds[2]
+        cond7 = (i==2) & (x<bounds[0])
+        outx[cond7] = bounds[0]
+        outy[cond7] = bounds[2]
+        cond8 = (i==2) & (x>bounds[1])
+        outx[cond8] = bounds[1]
+        outy[cond8] = bounds[2]
+
+        cond9 = (i==3) & (bounds[0]<=x) & (x<=bounds[1])
+        outx[cond9] = x[cond9]
+        outy[cond9] = bounds[3]
+        cond10 = (i==3) & (x<bounds[0])
+        outx[cond10] = bounds[0]
+        outy[cond10] = bounds[3]
+        cond11 = (i==3) & (x>bounds[1])
+        outx[cond11] = bounds[1]
+        outy[cond11] = bounds[3]
+
         if outx.shape[0] == 1:
             return outx[0], outy[0]
         return outx, outy
