@@ -117,8 +117,8 @@ def diagnose_input_psf(pipeline):
     intensity_mesh = np.abs(Ef_focal_mesh) ** 2
     
     # 4. Check FFT grid centering
-    padded_size = fg_np.grid_size * pipeline.p["pad_factor"]
-    
+    padded_size = fg_np._pad_geometry()[1]
+
     # FIXED: Use proper FFT center calculation
     if padded_size % 2 == 0:
         # For even grids, FFT center is at index padded_size // 2
@@ -547,17 +547,29 @@ class IncidentFieldGenerator:
             self.ifunc_matrix = xp.stack(
                 [f.get() for f in ifunc.influence_function], axis=0)
 
+    def _pad_geometry(self):
+        """(pad_width, padded_size) of the symmetric zero-padded FFT grid.
+
+        Single source of truth for the padded-grid size: the FFT paths pad by
+        ``pad_width`` on each side, so the grid the interpolation weights are
+        built against must be ``grid_size + 2*pad_width`` (== grid_size *
+        pad_factor exactly when grid_size*(pad_factor-1) is even, which is the
+        case for the bundled 400 px / pad_factor 4 ifunc -> (600, 1600))."""
+        N = self.grid_size
+        pad_width = (N * self.p["pad_factor"] - N) // 2
+        return pad_width, N + 2 * pad_width
+
     def precompute_interpolation_weights(self, mesh_points):
         """
         FIXED VERSION: Corrects FFT center calculation and axis mapping.
-        
+
         Key fixes:
         1. Proper even/odd grid center calculation for FFT convention
         2. Correct axis mapping (mesh Y->Y, mesh X->X)
         3. Validation checks
         """
-        padded_size = self.grid_size * self.p["pad_factor"]
-        
+        _, padded_size = self._pad_geometry()
+
         # FIX 1: Correct center calculation for FFT convention
         # For even grids: center is at index padded_size // 2
         # For odd grids: center is at index (padded_size - 1) // 2
@@ -649,16 +661,15 @@ class IncidentFieldGenerator:
 
     def apply_ef_to_lantern_jax(self, Ef_input_batch):
         """Pad and FFT-transform using JAX (runs on the selected device)."""
-        pad_width         = (self.grid_size * self.p["pad_factor"] - self.grid_size) // 2
+        pad_width, _       = self._pad_geometry()
         Ef_input_batch_dev = jax.device_put(Ef_input_batch, _jax_device)
         return _apply_pupil_jax_core(Ef_input_batch_dev, pad_width)
 
     def apply_ef_to_lantern(self, Ef_input_batch):
         """Pad and FFT-transform using SciPy (CPU, multithreaded)."""
         import scipy.fft as sp_fft
-        N           = self.grid_size
-        pad_width   = (N * self.p["pad_factor"] - N) // 2
-        padded_size = N + 2 * pad_width
+        N                     = self.grid_size
+        pad_width, padded_size = self._pad_geometry()
 
         E_padded = np.zeros(
             (Ef_input_batch.shape[0], padded_size, padded_size),
