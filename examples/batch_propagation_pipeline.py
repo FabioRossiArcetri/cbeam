@@ -478,7 +478,8 @@ def get_waveguide_properties(prop12, mesh_z=0):
     areas = np.array(B.diagonal())
     return {
         'mesh':          mesh_obj,
-        'mesh_areas':    areas,
+        'mesh_areas':    areas,        # diag(B); kept for lightweight diagnostics
+        'B':             B,            # full FE mass matrix, for exact modal overlaps
         'points':        points_2d,
         'modes':         active_modes,
         'n_modes':       n_modes,
@@ -495,9 +496,14 @@ class ModalProjector:
 
     def __init__(self, wvg_props, xp=np):
         self.xp = xp
-        modes   = xp.asarray(wvg_props["modes"])
-        areas   = xp.asarray(wvg_props["mesh_areas"])
-        self.projection_matrix = modes.conj() * areas
+        # Batched form of Propagator.make_mode_vector / inner_product:
+        #   u0[k] = conj(v_k)^T . B . E    with the full FE mass matrix B
+        # (the cbeam eigenmodes are B-orthonormal, so this is a clean
+        # projection; diag(B) alone is not -- v^T diag(B) v ~ 0.63, not 1).
+        modes = np.asarray(wvg_props["modes"])            # (n_modes, n_pts)
+        B     = wvg_props["B"]                            # sparse, host
+        pm    = B.dot(modes.conj().T).T                   # (n_modes, n_pts) dense
+        self.projection_matrix = xp.asarray(pm)           # -> device iff xp is jnp
 
     def project_batch(self, E_batch):
         """
