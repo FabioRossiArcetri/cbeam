@@ -450,7 +450,7 @@ def get_waveguide_properties(prop12, mesh_z=0):
     """Extract waveguide modal properties at a given z position."""
     p_segment  = prop12.get_prop(mesh_z)
     mesh_obj   = p_segment.mesh
-    mesh_areas = p_segment.wvg.assign_IOR()
+    p_segment.wvg.assign_IOR()          # ensure wvg.IOR_dict is populated
     modes      = p_segment.vs
 
     if len(modes.shape) == 3:
@@ -460,7 +460,6 @@ def get_waveguide_properties(prop12, mesh_z=0):
         active_modes = modes
 
     n_mesh_points = mesh_obj.points.shape[0]
-    areas         = getattr(p_segment, 'mesh_areas', np.ones(n_mesh_points))
 
     if active_modes.shape[0] == n_mesh_points:
         active_modes = active_modes.T
