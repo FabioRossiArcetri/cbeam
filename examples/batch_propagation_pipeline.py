@@ -858,7 +858,12 @@ class BatchPropagationPipeline:
     # ------------------------------------------------------------------
     def interpolate_output_to_grid(self, E_output_batch,
                                    grid_resolution=DEFAULT_GRID_RESOLUTION):
-        """Interpolate output spatial fields to a regular grid (always CPU)."""
+        """Interpolate the output *intensity* |E|**2 onto a regular grid (CPU).
+
+        Takes complex output fields on the mesh, returns
+        ``(intensity_2d_batch, X_plot, Y_plot)`` where intensity_2d_batch has
+        shape (n_fields, grid_resolution, grid_resolution) and is real |E|**2
+        (phase is not carried through)."""
         if grid_resolution not in self._delaunay_cache:
             self._delaunay_cache[grid_resolution] = \
                 self._precompute_delaunay_grid(grid_resolution)
@@ -875,10 +880,10 @@ class BatchPropagationPipeline:
         )
         flat_interpolated[:, ~valid_grid] = 0.0
 
-        n_fields    = E_np.shape[0]
-        uf_2d_batch = flat_interpolated.reshape(
+        n_fields          = E_np.shape[0]
+        intensity_2d_batch = flat_interpolated.reshape(
             n_fields, grid_resolution, grid_resolution)
-        return uf_2d_batch, X_plot, Y_plot
+        return intensity_2d_batch, X_plot, Y_plot
 
     # ------------------------------------------------------------------
     def _process_chunk(self, coeff_chunk, fg, proj, use_gpu):
@@ -1132,11 +1137,9 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
 
     for i in range(n_fields):
         ax = axes[i]
-        data = uf_2d_batch[i]
-        
-        # Convert complex to intensity
-        data_intensity = np.abs(data)
-        
+        # already real intensity |E|**2 from interpolate_output_to_grid()
+        data_intensity = uf_2d_batch[i]
+
         # Log intensity for colormap
         im_log = np.log(data_intensity + 1e-10)
         im = ax.imshow(im_log, cmap='inferno',
