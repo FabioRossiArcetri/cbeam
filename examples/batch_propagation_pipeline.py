@@ -1573,14 +1573,17 @@ def map_evaluated_to_ideal_geometry(core_centers, ideal_centers_list):
     
     H = np.dot(eval_scaled.T, ideal_centered)
     U, S, Vt = np.linalg.svd(H)
-    R = np.dot(Vt.T, U.T)
+    # determinant correction: without it R can come out as a reflection
+    # (improper rotation), which mirrors the detected grid before matching.
+    d = np.sign(np.linalg.det(np.dot(Vt.T, U.T)))
+    R = np.dot(Vt.T, np.dot(np.diag([1.0, d]), U.T))
     eval_aligned = np.dot(eval_scaled, R.T)
-    
+
     diff = eval_aligned[:, np.newaxis, :] - ideal_centered[np.newaxis, :, :]
     cost_matrix = np.sqrt(np.sum(diff**2, axis=-1))
     eval_indices, ideal_permutation = linear_sum_assignment(cost_matrix)
-    
-    print(f"[Geometric Fit] Estimated physical core pitch: {scale_eval / scale_ideal:.3f} µm")
+
+    print(f"[Geometric Fit] Detected/ideal scale ratio: {scale_eval / scale_ideal:.3f}")
     print(f"[Geometric Fit] Residual matching RMS error: {np.mean(cost_matrix[eval_indices, ideal_permutation]):.4e}\n")
     
     return ideal_permutation
