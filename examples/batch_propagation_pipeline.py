@@ -56,8 +56,8 @@ L2 = 50000
 DEFAULT_WAVELENGTH_UM   = 0.8
 DEFAULT_GRID_RESOLUTION = 400
 DEFAULT_SUBPIXEL_N      = 5      # side of the NxN sub-pixel sampling window
-N_SIGNALS = 19
-N_RINGS = 3
+N_RINGS   = 3
+N_SIGNALS = len(hex_ring_positions(N_RINGS, 1.0))   # lantern output cores; 19 for N_RINGS=3
 
 default_degenerate_groups_front = {}
 default_degenerate_groups_back = {}
