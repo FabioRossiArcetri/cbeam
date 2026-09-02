@@ -435,14 +435,18 @@ def build_and_characterize_lantern(p, reuse_cache=False):
             prop.load_init_conds(seed)
         prop.characterize(zi, zf, save=True, tag=tag)
 
+    nr = p["nrings"]
+
     prop1 = Propagator(p["wl"], PL_nrings, p["n_output_positions"] + 1)
-    prop1.degen_groups  = default_degenerate_groups_front[p["nrings"]]
-    prop1.skipped_modes = default_skipped_modes_front[p["nrings"]]
+    # copy so an in-place mutation by the propagator can't poison the module
+    # globals for the next call
+    prop1.degen_groups  = [list(g) for g in default_degenerate_groups_front[nr]]
+    prop1.skipped_modes = set(default_skipped_modes_front[nr])
     _characterize_or_load(prop1, 0, L1_, tag_base + "_front")
 
     prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"] + 1)
-    prop2.degen_groups  = default_degenerate_groups_back[p["nrings"]]
-    prop2.skipped_modes = default_skipped_modes_back[p["nrings"]]
+    prop2.degen_groups  = [list(g) for g in default_degenerate_groups_back[nr]]
+    prop2.skipped_modes = set(default_skipped_modes_back[nr])
     _characterize_or_load(prop2, L1_, L1_ + L2_, tag_base + "_back", seed=prop1)
 
     return ChainPropagator([prop1, prop2])
