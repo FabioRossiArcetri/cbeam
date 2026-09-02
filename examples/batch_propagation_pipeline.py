@@ -1140,8 +1140,8 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
         # already real intensity |E|**2 from interpolate_output_to_grid()
         data_intensity = uf_2d_batch[i]
 
-        # Log intensity for colormap
-        im_log = np.log(data_intensity + 1e-10)
+        # Log intensity for colormap (log10, matching diagnose_input_psf)
+        im_log = np.log10(data_intensity + 1e-10)
         im = ax.imshow(im_log, cmap='inferno',
                        extent=[X_plot.min(), X_plot.max(),
                                Y_plot.min(), Y_plot.max()],
@@ -1149,7 +1149,7 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
         ax.set_title(titles[i] if titles else f"Field {i}")
         ax.set_xlabel('x (μm)')
         ax.set_ylabel('y (μm)')
-        plt.colorbar(im, ax=ax, label='log(Intensity)')
+        plt.colorbar(im, ax=ax, label='log10(Intensity)')
 
         # ------- Peak detection as center of box with highest average signal -------
         # Compute average intensity in each box using convolution
