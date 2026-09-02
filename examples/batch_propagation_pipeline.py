@@ -39,7 +39,7 @@ from wavesolve.fe_solver import construct_B
 
 backend = get_backend()
 default_chunk_size = 10000
-default_gen_chunk_size = 1000
+default_gen_chunk_size = 64
 
 # -- optional JAX imports ------------------------------------------------
 if backend == 'jax':
@@ -878,7 +878,7 @@ class BatchPropagationPipeline:
     # ------------------------------------------------------------------
     def generate_batch_modal_coefficients(self, aberration_coeff_batch,
                                           use_gpu=None,
-                                          chunk_size=default_gen_chunk_size):
+                                          chunk_size=None):
         """
         Generate batch modal coefficients from aberration configurations.
 
