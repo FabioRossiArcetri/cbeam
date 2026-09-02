@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import DEFAULT
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
@@ -25,11 +24,7 @@ from cbeam.backend import get_backend, get_jax_device
 from cbeam.waveguide import PhotonicLantern, hex_ring_positions
 from cbeam.propagator import Propagator, ChainPropagator
 
-from scipy.interpolate import griddata, LinearNDInterpolator
-from scipy.ndimage import maximum_filter
-from scipy.optimize import linear_sum_assignment
-
-from scipy.interpolate import RegularGridInterpolator, griddata
+from scipy.interpolate import griddata
 from scipy.ndimage import maximum_filter, map_coordinates
 from scipy.optimize import linear_sum_assignment
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -59,9 +54,8 @@ L1 = 50000
 L2 = 50000
 
 DEFAULT_WAVELENGTH_UM   = 0.8
-DEFAULT_WAVELENGTH_NM   = 800.0
 DEFAULT_GRID_RESOLUTION = 400
-DEFAULT_SUBPIXEL_N      = 5
+DEFAULT_SUBPIXEL_N      = 5      # side of the NxN sub-pixel sampling window
 N_SIGNALS = 19
 N_RINGS = 3
 
@@ -320,8 +314,8 @@ def _jax_fft_batch(Ef_input_batch, pad_width):
     )
 
 def batch_collect_subpixel_signals(images: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
-    rows = coords[0]  # Shape: (N_SIGNALS, 5, 5)
-    cols = coords[1]  # Shape: (N_SIGNALS, 5, 5)
+    rows = coords[0]  # Shape: (N_SIGNALS, DEFAULT_SUBPIXEL_N, DEFAULT_SUBPIXEL_N)
+    cols = coords[1]  # Shape: (N_SIGNALS, DEFAULT_SUBPIXEL_N, DEFAULT_SUBPIXEL_N)
     
     def extract_single_core_patch(img, r_coords, c_coords):
         c_pack = jnp.stack([r_coords, c_coords], axis=0)
@@ -1315,7 +1309,7 @@ def visualize_batch_hex_grid_signals(
         print(f"Processing core integration tracks for: {field_title}...")
 
         output_signals = collect_subpixel_signals(
-            uf_2d_batch[i], x_min, y_min, dx, dy, core_centers, n=7)
+            uf_2d_batch[i], x_min, y_min, dx, dy, core_centers)
 
         standardized_signals = np.zeros(len(output_signals))
         standardized_signals[ideal_permutation] = output_signals
@@ -1610,7 +1604,7 @@ def map_evaluated_to_ideal_geometry(core_centers, ideal_centers_list):
     
     return ideal_permutation
 
-def collect_subpixel_signals(image_2d, x_min, y_min, dx, dy, centers, n=7):
+def collect_subpixel_signals(image_2d, x_min, y_min, dx, dy, centers, n=DEFAULT_SUBPIXEL_N):
     """Extracts an n x n subimage centered on fractional continuous coordinates."""
     signals = np.zeros(len(centers))
     half_n = n // 2
