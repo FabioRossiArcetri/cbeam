@@ -587,18 +587,19 @@ class IncidentFieldGenerator:
         print(f"  Grid parity: {'even' if padded_size % 2 == 0 else 'odd'}")
         print(f"  Center offset: {center_offset}")
 
-        # FIX 2: Retrieve and validate pixel scale
         pixel_scale = self.p.get("pixel_scale_um", 1.0)
         print(f"  Pixel scale: {pixel_scale} μm/pixel")
-        
-        # FIX 3: CORRECT axis mapping
-        # mesh_points is shaped (N_points, 2) where:
-        #   mesh_points[:, 0] = Y coordinates (vertical)
-        #   mesh_points[:, 1] = X coordinates (horizontal)
-        # This matches the convention: points = (y, x) in mesh.points
-        mesh_y = mesh_points[:, 0]  # Vertical coordinate
-        mesh_x = mesh_points[:, 1]  # Horizontal coordinate
-        
+
+        # Axis mapping.  cbeam stores mesh.points[:, 0] = x, [:, 1] = y (see
+        # waveguide.py).  The FFT image E_lantern is indexed [row, col] in the
+        # standard image convention (row = y, col = x) -- the same convention
+        # used by diagnose_input_psf and interpolate_output_to_grid.  So the
+        # column index (ix0) is built from physical x and the row index (iy0)
+        # from physical y; anything else transposes the input relative to the
+        # rest of the pipeline.
+        mesh_x = mesh_points[:, 0]   # physical x -> FFT column (ix0)
+        mesh_y = mesh_points[:, 1]   # physical y -> FFT row    (iy0)
+
         # Validate mesh range
         print(f"  Mesh X range: [{mesh_x.min():.3f}, {mesh_x.max():.3f}] μm")
         print(f"  Mesh Y range: [{mesh_y.min():.3f}, {mesh_y.max():.3f}] μm")
