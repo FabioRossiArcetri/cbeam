@@ -430,6 +430,13 @@ def build_and_characterize_lantern(p, reuse_cache=False):
         prop.characterize(zi, zf, save=True, tag=tag)
 
     nr = p["nrings"]
+    if nr not in default_degenerate_groups_front:
+        raise ValueError(
+            f"no default degen_groups / skipped_modes configured for nrings={nr}; "
+            f"only nrings={sorted(default_degenerate_groups_front)} is set up. "
+            f"Add entries to default_*_front/back, or set prop.degen_groups=[] / "
+            f"prop.skipped_modes=set() explicitly to run without mode bookkeeping."
+        )
 
     prop1 = Propagator(p["wl"], PL_nrings, p["n_output_positions"] + 1)
     # copy so an in-place mutation by the propagator can't poison the module
