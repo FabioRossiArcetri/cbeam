@@ -1264,57 +1264,24 @@ def visualize_batch_hex_grid_signals(
 
     uf_2d_batch, X_plot_out, Y_plot_out = pipeline.interpolate_output_to_grid(
         E_output_batch, grid_resolution)
-    x0_out = X_plot_out[0, 0]
-    y0_out = Y_plot_out[0, 0]
+
+    # Physical -> pixel mapping for the output grid, taken from the grid itself
+    # (the core centres live in the same physical frame, over the mesh extent).
+    x_min = X_plot_out[0, 0]
+    y_min = Y_plot_out[0, 0]
+    dx    = X_plot_out[0, 1] - X_plot_out[0, 0]
+    dy    = Y_plot_out[1, 0] - Y_plot_out[0, 0]
 
     for i in range(n_fields):
         field_title = titles[i] if titles else f"Field {i}"
         print(f"Processing core integration tracks for: {field_title}...")
-    
-        # =====================================================================
-        # FIX: Map Physical Core Coordinates to Matrix Pixel Grid Space
-        # =====================================================================
-        from scipy.ndimage import map_coordinates
-    
-        current_frame = uf_2d_batch[i]
-        output_signals = []
-        
-        # 1. Reconstruct the spatial grid extent from the plotting parameters
-        # This exactly mimics how the 2D grid was compiled during your calibration step
-        grid_extent = 3.0  # Or your specific calibration viewport half-width
-        res = current_frame.shape[0]  # e.g., 200 or 512 pixels
-        
-        # Define a 5x5 sub-pixel footprint scaled directly to matrix index increments
-        window_offsets = np.linspace(-2.0, 2.0, 5)
-        DR, DC = np.meshgrid(window_offsets, window_offsets)
-    
-        for cx, cy in core_centers:
-            # Convert physical coordinates (µm) to matrix pixel coordinates:
-            # pixel = ((physical - min_physical) / total_physical_range) * resolution
-            pixel_col = ((cx - (-grid_extent)) / (2.0 * grid_extent)) * res
-            pixel_row = ((cy - (-grid_extent)) / (2.0 * grid_extent)) * res
-            
-            # Apply sub-pixel pixel-window offsets
-            sub_rows = pixel_row + DR
-            sub_cols = pixel_col + DC
-            
-            # Sample directly from the active matrix footprint
-            patch = map_coordinates(
-                current_frame, 
-                [sub_rows, sub_cols], 
-                order=1, 
-                mode='constant', 
-                cval=0.0
-            )
-            output_signals.append(np.mean(patch))
-            
-        output_signals = np.array(output_signals)
-        # =====================================================================
-    
+
+        output_signals = collect_subpixel_signals(
+            uf_2d_batch[i], x_min, y_min, dx, dy, core_centers, n=7)
+
         standardized_signals = np.zeros(len(output_signals))
         standardized_signals[ideal_permutation] = output_signals
-       
-        
+
         print(f"Displaying Core Matrix for: {field_title}")
         display_hex_grid_plots(ideal_grid_positions, standardized_signals)
 
