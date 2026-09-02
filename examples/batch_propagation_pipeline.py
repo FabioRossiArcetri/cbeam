@@ -10,6 +10,8 @@
 # 4. Proper half-pixel offset handling
 # =====================================================================
 
+from __future__ import annotations
+
 import os
 from unittest.mock import DEFAULT
 import numpy as np
