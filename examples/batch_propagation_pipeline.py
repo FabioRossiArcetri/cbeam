@@ -486,19 +486,19 @@ class ModalProjector:
         Returns
         -------
         u0_batch : array, shape (n_fields, n_modes)
-            Raw (un-normalised) overlap integrals  ⟨vₖ | E⟩.
-            The L2 norm of this vector is the total amplitude coupled into
-            the tracked modes; dividing by it would destroy the information
-            about how much light missed the waveguide entirely, which is
-            useful for diagnosing coupling efficiency and is needed so that
-            the power spectra at different wavelengths are physically
-            comparable.  Callers that need a normalised initial condition
-            (e.g. for a purely-modal propagation sanity check) should divide
-            by  xp.linalg.norm(u0_batch, axis=1, keepdims=True) themselves.
+            Unit-L2-norm modal coefficients: the overlap integrals
+            ``⟨vₖ | E⟩`` divided by their own L2 norm (rows that are exactly
+            zero are left as zero).  This is a normalised initial condition,
+            ready to hand to ``propagate``.  The absolute amount of pupil
+            power that actually coupled into the tracked modes is *not*
+            carried here -- it is returned separately as
+            ``coupling_efficiency``.
         coupling_efficiency : array, shape (n_fields,)
-            L2 norm of each projected vector before any normalisation.
-            Values close to 1.0 mean nearly all pupil power coupled into the
-            tracked modes; values << 1.0 flag misalignment or scale problems.
+            L2 norm of each projected vector *before* normalisation.
+            ~1.0 means nearly all pupil power coupled into the tracked
+            modes; << 1.0 flags misalignment or a pixel-scale problem.
+            Retain this if you need output power spectra to be comparable
+            across wavelengths -- the normalised ``u0_batch`` alone cannot be.
         """
         u0_batch = E_batch @ self.projection_matrix.T
         coupling_efficiency = self.xp.linalg.norm(u0_batch, axis=1)
