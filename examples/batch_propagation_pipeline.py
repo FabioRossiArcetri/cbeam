@@ -352,6 +352,8 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
         "taper_factor":  12.,
         "rclad":         9.0,
         "rjack":         27,
+        "L1":            L1,
+        "L2":            L2,
         "z_ex":          L1 + L2,
         "nclad":         1.444,
         "pad_factor":    4,
@@ -399,35 +401,49 @@ def _wavelength_tag(wavelength_nm: float) -> str:
     return f"{int(round(wavelength_nm)):04d}"
 
 
-def build_and_characterize_lantern(p):
-    """Set up the PhotonicLantern and return a ChainPropagator."""        
+def build_and_characterize_lantern(p, reuse_cache=False):
+    """Set up the PhotonicLantern and return a ChainPropagator.
+
+    reuse_cache : if True, a previously saved characterization matching the
+        (port-count, wavelength) tag is loaded instead of being recomputed.
+        The tag does NOT encode taper_factor / resolutions / radii, so only
+        enable this when those have not changed since the cache was written.
+    """
     PL_nrings = PhotonicLantern(
         p["output_positions"], p["rcores"], p["rclad"], p["rjack"],
         p["ncores"], p["nclad"], p["njack"], p["z_ex"],
         p["taper_factor"], p["core_res"], p["clad_res"], p["jack_res"],
     )
 
-    prop1 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)
+    L1_ = p.get("L1", L1)
+    L2_ = p.get("L2", L2)
+
+    cache_prefix       = "port"
+    n_output_positions = str(p["n_output_positions"])
+    wavelength_nm      = p["wavelength_nm"]
+    tag_base = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}"
+
+    def _characterize_or_load(prop, zi, zf, tag, seed=None):
+        if reuse_cache:
+            try:
+                prop.load(tag)
+                print(f"  loaded cached characterization '{tag}'")
+                return
+            except (FileNotFoundError, OSError):
+                print(f"  no cache for '{tag}', characterizing ...")
+        if seed is not None:
+            prop.load_init_conds(seed)
+        prop.characterize(zi, zf, save=True, tag=tag)
+
+    prop1 = Propagator(p["wl"], PL_nrings, p["n_output_positions"] + 1)
     prop1.degen_groups  = default_degenerate_groups_front[p["nrings"]]
     prop1.skipped_modes = default_skipped_modes_front[p["nrings"]]
+    _characterize_or_load(prop1, 0, L1_, tag_base + "_front")
 
-    cache_prefix = "port"
-    n_output_positions = str(p["n_output_positions"])
-    wavelength_nm = p["wavelength_nm"]
-    
-    tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_front"
-
-    prop1.characterize(0,L1,save=True,tag=tag)
-    #prop1.load(tag)
-
-    prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"]+1)    
+    prop2 = Propagator(p["wl"], PL_nrings, p["n_output_positions"] + 1)
     prop2.degen_groups  = default_degenerate_groups_back[p["nrings"]]
     prop2.skipped_modes = default_skipped_modes_back[p["nrings"]]
-
-    prop2.load_init_conds(prop1)
-    tag = f"{n_output_positions}{cache_prefix}_{_wavelength_tag(wavelength_nm)}" + "_back"
-    prop2.characterize(L1,L1+L2,save=True,tag=tag)
-    #prop2.load(tag)
+    _characterize_or_load(prop2, L1_, L1_ + L2_, tag_base + "_back", seed=prop1)
 
     return ChainPropagator([prop1, prop2])
 
