@@ -12,15 +12,9 @@ from .constants import N_SIGNALS, DEFAULT_GRID_RESOLUTION
 
 
 def diagnose_input_psf(pipeline):
-    """
-    Enhanced diagnostic tool for the input PSF with fixes for centering issues.
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from scipy.interpolate import griddata
-    from scipy.special import j1
-
-    print("\n=== RUNNING INPUT PSF CENTERING & SCALE DIAGNOSTIC (FIXED VERSION) ===")
+    """Diagnostic for the input PSF: mask centring, FFT-grid centring, mesh
+    interpolation and coupling efficiency, with a 2x3 summary figure."""
+    print("\n=== RUNNING INPUT PSF CENTERING & SCALE DIAGNOSTIC ===")
 
     # 1. Generate unaberrated field (zero coefficients)
     fg_np = pipeline._field_gen_np
@@ -54,7 +48,7 @@ def diagnose_input_psf(pipeline):
     # 4. Check FFT grid centering
     padded_size = fg_np._pad_geometry()[1]
 
-    # FIXED: Use proper FFT center calculation
+    # FFT centre index (even vs odd padded grid)
     if padded_size % 2 == 0:
         # For even grids, FFT center is at index padded_size // 2
         fft_center_idx = padded_size // 2
@@ -259,11 +253,6 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
     show_arrow : bool
         If True, draw a cyan arrow from the top‑right corner pointing to the peak.
     """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import FancyArrowPatch
-    from scipy.ndimage import uniform_filter
-
     n_fields = min(uf_2d_batch.shape[0], maxv)
     n_cols = min(3, n_fields)
     n_rows = (n_fields + n_cols - 1) // n_cols
@@ -367,7 +356,8 @@ def display_hex_grid_plots(ideal_centers, standardized_signals):
     ax1 = fig.add_subplot(121, projection='3d')
     ax2 = fig.add_subplot(122)
     
-    polys, colors_list, n_sides = [], [], 6
+    n_sides = 6
+    polys, colors_list = [], []
     for i, (x, y) in enumerate(centers):
         height = heights[i]
         color = cmap(norm(height))
@@ -425,7 +415,7 @@ def visualize_batch_hex_grid_signals(
     waveguide_modes_final = pipeline.wvg_props_output['modes']
 
     # =====================================================================
-    # FIX: Collapse (n_modes, n_mesh_points) into a 1D map (n_mesh_points,)
+    # Collapse (n_modes, n_mesh_points) into a 1D map (n_mesh_points,)
     # =====================================================================
     total_modes_profile = np.sum(np.abs(waveguide_modes_final) ** 2, axis=0)
 

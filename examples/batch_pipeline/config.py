@@ -5,7 +5,9 @@ import numpy as np
 
 from cbeam.waveguide import hex_ring_positions
 
-from .constants import L1, L2, N_RINGS, DEFAULT_WAVELENGTH_UM
+from .constants import (
+    L1, L2, N_RINGS, DEFAULT_WAVELENGTH_UM,
+)
 
 
 def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_UM):
@@ -60,7 +62,6 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     return params
 
 
-
 def create_sparse_aberration_configs_mono(n, m, minv, maxv):
     """
     Generate *n* random aberration configurations where each configuration 
@@ -103,6 +104,7 @@ def create_random_aberration_configs(n, m, minv, maxv):
         np.ndarray of shape (n, m), dtype float64.
     """
     return np.random.uniform(minv, maxv, (n, m)).astype(np.float64)
+
 
 def create_ramp_aberration_configs(modes, n_steps, minv, maxv):
     """

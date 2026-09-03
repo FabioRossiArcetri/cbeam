@@ -48,10 +48,6 @@ def _wavelength_tag(wavelength_nm: float) -> str:
     native grid isn't on round-nm values -- in that case you likely want
     an explicit {wavelength_nm: tag} mapping instead of this formula."""
     return f"{int(round(wavelength_nm)):04d}"
-
-
-
-
 def build_and_characterize_lantern(p, reuse_cache=False):
     """Set up the PhotonicLantern and return a ChainPropagator.
 
@@ -108,8 +104,6 @@ def build_and_characterize_lantern(p, reuse_cache=False):
     _characterize_or_load(prop2, L1_, L1_ + L2_, tag_base + "_back", seed=prop1)
 
     return ChainPropagator([prop1, prop2])
-
-
 
 
 def get_waveguide_properties(prop12, mesh_z=0):
@@ -192,7 +186,6 @@ class ModalProjector:
         return u0_batch / safe_norms, coupling_efficiency
 
 
-
 class IncidentFieldGenerator:
     """Fixed version with correct centering and axis mapping."""
 
@@ -226,19 +219,12 @@ class IncidentFieldGenerator:
         return pad_width, N + 2 * pad_width
 
     def precompute_interpolation_weights(self, mesh_points):
-        """
-        FIXED VERSION: Corrects FFT center calculation and axis mapping.
-
-        Key fixes:
-        1. Proper even/odd grid center calculation for FFT convention
-        2. Correct axis mapping (mesh Y->Y, mesh X->X)
-        3. Validation checks
-        """
+        """Bilinear-interpolation weights mapping the padded FFT grid onto the
+        FE mesh nodes: even/odd-aware FFT centre, mesh x -> column / mesh y ->
+        row (see the axis-mapping note below), plus out-of-bounds validation."""
         _, padded_size = self._pad_geometry()
 
-        # FIX 1: Correct center calculation for FFT convention
-        # For even grids: center is at index padded_size // 2
-        # For odd grids: center is at index (padded_size - 1) // 2
+        # FFT centre index: padded_size // 2 (even) or (padded_size - 1) // 2 (odd)
         if padded_size % 2 == 0:
             center_offset = padded_size / 2.0
         else:
@@ -334,7 +320,6 @@ class IncidentFieldGenerator:
 
     def apply_ef_to_lantern(self, Ef_input_batch):
         """Pad and FFT-transform using SciPy (CPU, multithreaded)."""
-        import scipy.fft as sp_fft
         N                     = self.grid_size
         pad_width, padded_size = self._pad_geometry()
 
@@ -361,7 +346,6 @@ class IncidentFieldGenerator:
         val11 = E_lantern_batch[:, self.iy1, self.ix1]
         return (val00 * self.w00.T + val01 * self.w01.T +
                 val10 * self.w10.T + val11 * self.w11.T)
-
 
 
 class BatchPropagationPipeline:
@@ -470,8 +454,6 @@ class BatchPropagationPipeline:
     # ------------------------------------------------------------------
     def _precompute_delaunay_grid(self, grid_resolution):
         """Precompute Delaunay triangulation and barycentric weights."""
-        from scipy.spatial import Delaunay
-
         mesh_pts = self.wvg_props_output['mesh'].points
         x_min, x_max = mesh_pts[:, 0].min(), mesh_pts[:, 0].max()
         y_min, y_max = mesh_pts[:, 1].min(), mesh_pts[:, 1].max()
