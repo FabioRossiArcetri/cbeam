@@ -27,6 +27,7 @@ def plot_fiber_spectra(
     fiber_indices: Optional[Sequence[int]] = None,
     ax=None,
     title: Optional[str] = None,
+    plotSum: bool = True
 ):
     """
     Overlay per-fiber power spectra for one field on a single axes.
@@ -53,6 +54,11 @@ def plot_fiber_spectra(
         color = cmap(k / max(1, len(fiber_indices) - 1))
         ax.plot(wl_nm, power_spectra[:, field_idx, fiber_idx],
                  label=f"Fiber {fiber_idx}", color=color, linewidth=1.2)
+
+    if plotSum:
+        total = power_spectra[:, field_idx, :].sum(axis=1)
+        ax.plot(wl_nm, total, label="Sum (all cores)",
+                 color="black", linewidth=1.8, linestyle="--")
 
     ax.set_xlabel("Wavelength (nm)")
     ax.set_ylabel("Power (a.u.)")

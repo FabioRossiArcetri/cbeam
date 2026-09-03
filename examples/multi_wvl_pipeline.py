@@ -34,6 +34,7 @@
 # =====================================================================
 
 import gc
+import os
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -188,12 +189,46 @@ def _load_or_characterize(
             print(f"    [{tag}] characterization complete and cached.")
 
 # =====================================================================
-# DISPERSION MODEL: Sellmeier-based neff scaling
+# CHROMATIC MODEL
+# =====================================================================
+# We feed the *same* physical photonic lantern with light of different
+# colours. Its geometry (core positions, radii, taper, segment lengths,
+# mesh) and its dopant concentrations -- hence the index *contrast*
+# Δn = n_core − n_clad and Δn_jack = n_jack − n_clad -- are physical
+# invariants and do NOT change with wavelength.
+#
+# What does change with colour:
+#   1. the vacuum wavenumber k0 = 2π/λ, and
+#   2. the V-number, V = 2π ρ √(n_core² − n_clad²) / λ.
+# Both scale as 1/λ and both are captured by solving (or loading) a
+# per-wavelength local mode basis with its own `wl` -- that is exactly
+# what build_and_characterize_lantern_at_wavelength() does via the
+# per-wavelength cache tag. The Fraunhofer PSF scale Δξ ∝ λ is the third
+# chromatic input and is applied here as pixel_scale_um ∝ λ.
+#
+# What is deliberately NOT modelled: the material (Sellmeier) dispersion
+# of the glass, n_silica(λ). An earlier version of this function added
+# n_silica(λ) − n_silica(λ_ref) to n_clad, n_core AND n_jack alike. That
+# shift is *common-mode*: adding the same δn to every region shifts every
+# guided mode's n_eff by ≈ δn, i.e. it adds a phase (2π/λ)·δn·z that is
+# identical for all modes and factors straight out of the output -- it
+# changes neither the per-fibre intensities nor the relative phases
+# between fibres. The old code also never reached the FEM solve with it
+# (the shared PL_N geometry keeps the reference indices), so it was
+# computed and silently dropped. It is not applied here. The genuinely
+# unmodelled part is second order: the *differential* dispersion between
+# near-cutoff and well-confined modes, and the dopants' own dispersion
+# making Δn slightly λ-dependent. Capturing that needs real doped-glass
+# Sellmeier data and a full re-characterisation, not a uniform shift.
 # =====================================================================
 
 def sellmeier_n_silica(wavelength_um: float) -> float:
     """
     Refractive index of fused silica (Malitson 1965 Sellmeier fit).
+
+    Kept as a utility for sizing the common-mode material-dispersion shift
+    (see the CHROMATIC MODEL note above) -- it is *not* applied to the
+    lantern indices by scale_params_to_wavelength(), by design.
 
     Parameters
     ----------
@@ -219,85 +254,315 @@ def scale_params_to_wavelength(
     ref_wavelength_nm: Optional[float] = None,
 ) -> dict:
     """
-    Return a copy of *base_params* with refractive indices and the
-    focal-plane pixel scale updated for *wavelength_nm* using the
-    Sellmeier equation for fused silica (Malitson 1965).
+    Return a copy of *base_params* retuned for *wavelength_nm*.
 
-    This implements a first-order dispersion model that avoids a full
-    FEM re-characterisation at every wavelength:
+    The lantern is a fixed physical object (see the CHROMATIC MODEL note
+    above), so the refractive-index keys are left untouched -- geometry
+    and dopant contrast are wavelength-independent. Only the two genuinely
+    wavelength-dependent inputs are changed:
 
-      neff(λ) ≈ n_clad(λ) + Δn₀ · [n_core(λ) − n_clad(λ)] / Δn₀_ref
-
-    where  Δn₀ = neff_ref − n_clad_ref  is the modal-field offset at the
-    reference wavelength.  The approximation is valid when the mode profile
-    does not change dramatically with wavelength (i.e. well above cutoff).
-    Near-cutoff modes (the highest-order modes of a 19-port lantern near
-    960 nm) will be less accurate; use a full FEM characterisation there.
-
-    The focal-plane pixel scale is also updated: Δξ ∝ λ (Fraunhofer
-    diffraction), so pixel_scale_um(λ) = pixel_scale_um(λ₀) · λ/λ₀.
+      * ``wl`` / ``wavelength_nm`` -- the vacuum wavelength that the
+        per-wavelength FEM mode basis is solved/loaded at (this is what
+        carries the k0 = 2π/λ and V ∝ 1/λ chromatic response).
+      * ``pixel_scale_um`` -- Fraunhofer focal-plane sampling scales
+        linearly with wavelength, Δξ ∝ λ, so
+        pixel_scale_um(λ) = pixel_scale_um(λ₀) · λ/λ₀.
 
     Parameters
     ----------
     base_params : dict
-        Output of get_simulation_parameters(). Must contain at minimum:
-        ``nclad``, ``ncore``, ``njack``, ``pixel_scale_um``,
-        ``wavelength_nm``.
+        Output of get_simulation_parameters(). Must contain at least
+        ``pixel_scale_um`` and ``wavelength_nm``.
     wavelength_nm : float
         Target wavelength in nanometres.
     ref_wavelength_nm : float or None
-        Reference wavelength (the one whose full FEM characterisation
-        exists on disk).  Defaults to base_params["wavelength_nm"].
+        Reference wavelength the pixel scale / base params are given at.
+        Defaults to base_params["wavelength_nm"].
 
     Returns
     -------
     p_lambda : dict
-        Updated parameter dict.  Keys changed:
-        ``wl``, ``wavelength_nm``, ``nclad``, ``ncore``, ``njack``,
-        ``pixel_scale_um``.
+        Copy of base_params with ``wl``, ``wavelength_nm`` and
+        ``pixel_scale_um`` updated; every other key (including all
+        refractive indices) is passed through unchanged.
     """
     if ref_wavelength_nm is None:
         ref_wavelength_nm = float(base_params["wavelength_nm"])
 
-    wl_um     = wavelength_nm     / 1000.0
-    ref_wl_um = ref_wavelength_nm / 1000.0
-
-    # ----------------------------------------------------------------
-    # Sellmeier indices at reference and target wavelengths
-    # ----------------------------------------------------------------
-    n_sil_ref = sellmeier_n_silica(ref_wl_um)
-    n_sil_tgt = sellmeier_n_silica(wl_um)
-
-    # Silica index shift between reference and target wavelengths.
-    # Used to rescale all three material indices (cladding, core, jacket)
-    # since they are all doped-silica variants whose Sellmeier curves
-    # track pure silica to first order.
-    delta_n_sil = n_sil_tgt - n_sil_ref
-
     p_lambda = dict(base_params)
 
-    # ----------------------------------------------------------------
-    # Update material indices
-    # ----------------------------------------------------------------
-    p_lambda["wl"]           = wl_um
+    p_lambda["wl"]            = wavelength_nm / 1000.0
     p_lambda["wavelength_nm"] = wavelength_nm
 
-    p_lambda["nclad"] = base_params["nclad"] + delta_n_sil
-    p_lambda["ncore"] = base_params["ncore"] + delta_n_sil
-    p_lambda["njack"] = base_params["njack"] + delta_n_sil
-
-    # Recompute derived per-material lists that copy the scalar value.
-    n_core_new = p_lambda["ncore"]
-    p_lambda["ncores"] = [n_core_new] * len(base_params["ncores"])
-
-    # ----------------------------------------------------------------
-    # Scale focal-plane pixel size with wavelength (Fraunhofer: Δξ ∝ λ)
-    # ----------------------------------------------------------------
+    # Fraunhofer: focal-plane pixel pitch scales with wavelength.
     p_lambda["pixel_scale_um"] = (
         base_params["pixel_scale_um"] * (wavelength_nm / ref_wavelength_nm)
     )
 
     return p_lambda
+
+
+# =====================================================================
+# AUTOMATIC PER-WAVELENGTH MODE BOOKKEEPING
+# =====================================================================
+# cbeam's coupled-mode solver needs two pieces of hand-supplied
+# bookkeeping per waveguide segment (see cbeam's 19-port example, where
+# the author fills them in by eye):
+#
+#   degen_groups  : lists of local-mode indices that are (near-)degenerate
+#                   -- same symmetry, indistinguishable n_eff. Within such
+#                   a group the eigensolver returns an arbitrary rotation
+#                   that flips frame to frame; correct_degeneracy() locks
+#                   that rotation with a Procrustes fit so the adaptive
+#                   z-stepper doesn't mistake basis spin for physical
+#                   coupling (and thrash / pollute the coupling matrices).
+#   skipped_modes : indices that are not robustly guided (n_eff at/below
+#                   the local cutoff index -> delocalised, numerically
+#                   unstable). Dropped from the residual bookkeeping.
+#
+# The single hard-coded config from cbeam's 800 nm example does NOT
+# transfer across wavelength: as V drops with increasing wavelength the
+# highest-order modes move toward cutoff, LP multiplets that were split
+# collapse, and the spurious mode changes index -- a grouping valid at
+# 800 nm mis-tracks at, e.g., 820 / 850 / 860 nm (observed: 4x the
+# adaptive z-steps, 60% power lost in to_channel_basis).
+#
+# Approach: the degeneracy structure a segment's correct_degeneracy()
+# needs is a *symmetry* fact read cleanly at the segment's most-degenerate
+# end -- the multimode input (z=0) for the front, the isolated-core output
+# (z=z_ex) for the back -- from ONE untracked FEM solve there. No adaptive
+# stepping, no mode tracking (which is the fragile part): just sort n_eff
+# and cut it into multiplets at the gaps. Two solves per wavelength.
+#
+# The cutoff reference is z-dependent: at the multimode input the guide is
+# the r<rclad region against the *jacket*; at the isolated output it is a
+# core against the *cladding*. _cutoff_index() picks the right one per end.
+# =====================================================================
+
+def _ior_index(wvg, *prefixes: str) -> Optional[float]:
+    """Median of the IOR-dict values whose label starts with any of
+    *prefixes* (case-insensitive). None if no label matches."""
+    ior  = wvg.assign_IOR()
+    vals = [float(v) for k, v in ior.items()
+            if str(k).lower().startswith(tuple(p.lower() for p in prefixes))]
+    return float(np.median(vals)) if vals else None
+
+
+def _cladding_index(wvg) -> float:
+    n = _ior_index(wvg, "clad")
+    if n is None:
+        raise ValueError(f"no 'clad*' entry in IOR dict; keys={list(wvg.assign_IOR())}")
+    return n
+
+
+def _cutoff_index(wvg, end: str) -> float:
+    """Reference index below which a mode is unguided at a given lantern
+    end. 'front' (multimode input): the jacket. 'back' (isolated output):
+    the cladding. Falls back to the cladding if there is no jacket."""
+    if end == "front":
+        return _ior_index(wvg, "jack") or _cladding_index(wvg)
+    return _cladding_index(wvg)
+
+
+def probe_endpoint_neffs(
+    wl_um: float,
+    wvg,
+    n_modes: int,
+    z_ex: Optional[float] = None,
+    verbose: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    One untracked FEM solve at each lantern end (z = 0 and z = z_ex) on a
+    throwaway Propagator. Returns ``(neff0, neffL)``, each a
+    descending-sorted length-``n_modes`` real array. This is all the
+    automatic bookkeeping needs -- no adaptive sweep, no mode tracking.
+    """
+    z_ex = float(wvg.z_ex if z_ex is None else z_ex)
+    probe = Propagator(wl_um, wvg, n_modes)
+    if verbose:
+        print(f"    [probe] solve_at(z=0) and solve_at(z={z_ex:g}) ...")
+    n0, _ = probe.solve_at(0.0)
+    nL, _ = probe.solve_at(z_ex)
+    n0 = np.sort(np.real(np.asarray(n0, dtype=np.complex128)))[::-1]
+    nL = np.sort(np.real(np.asarray(nL, dtype=np.complex128)))[::-1]
+    return n0, nL
+
+
+def _multiplets(neff_desc: np.ndarray, atol: float) -> List[List[int]]:
+    """Cut a descending-sorted n_eff spectrum into degenerate multiplets:
+    a new multiplet starts wherever the gap to the previous mode exceeds
+    ``atol``. Returns a list of index lists covering 0..len-1."""
+    runs: List[List[int]] = [[0]]
+    for i in range(1, len(neff_desc)):
+        if neff_desc[i - 1] - neff_desc[i] <= atol:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return runs
+
+
+def infer_lantern_mode_bookkeeping(
+    wl_um: float,
+    wvg,
+    n_modes: int,
+    z_split: float,           # kept for signature stability; not needed here
+    *,
+    n_expected_guided: Optional[int] = None,
+    z_ex: Optional[float] = None,
+    degen_atol: float = 1e-5,
+    cutoff_margin: float = 5e-5,
+    verbose: bool = True,
+    n_probe: Optional[int] = None,   # accepted & ignored (old API)
+) -> Tuple[List[List[int]], List[List[int]], List[int]]:
+    """
+    Derive ``(degen_groups_front, degen_groups_back, skipped_modes)`` for
+    the lantern at one wavelength from two endpoint FEM solves.
+
+    Parameters
+    ----------
+    wl_um : float
+        Vacuum wavelength in micrometres (``p_lambda["wl"]``).
+    wvg : PhotonicLantern
+        The (wavelength-independent) geometry.
+    n_modes : int
+        Nmax tracked by the Propagator.
+    z_split : float
+        Unused (endpoint solves don't need it); kept so callers that pass
+        it positionally keep working.
+    n_expected_guided : int or None
+        Number of genuinely guided modes (= number of output cores). When
+        given, exactly ``n_modes - n_expected_guided`` modes are skipped
+        (the lowest n_eff at the multimode input). When None, skips come
+        from the jacket-proximity test at the input.
+    degen_atol : float
+        n_eff gap below which adjacent modes are one multiplet. ~1e-5
+        catches true LP doublets (gap ~1e-8..1e-5) without merging
+        distinct-but-close modes (gap ~1e-4).
+    cutoff_margin : float
+        Used only for the ``n_expected_guided=None`` skip path and for the
+        "looks guided" warning.
+
+    Returns
+    -------
+    degen_groups_front, degen_groups_back : list[list[int]]
+    skipped_modes : list[int]
+
+    Notes
+    -----
+    * Front groups are read at z=0 (multimode input) in eigensolver order,
+      which is the index convention compute_modes() starts the front
+      segment in.
+    * Back groups are read at z=z_ex among the kept modes; for a lantern
+      these collapse to a single near-degenerate block, which is
+      invariant under the front->back index permutation.
+    * A multiplet that contains the skipped mode AND a kept mode is still
+      emitted as a front group (with the skipped index included) so
+      correct_degeneracy() can lock the kept partner's rotation against
+      the soon-to-be-zeroed spurious one -- this is what stabilises the
+      band edge (e.g. modes 18-19 degenerate at 850-860 nm).
+    """
+    z_ex = float(wvg.z_ex if z_ex is None else z_ex)
+    n0, nL = probe_endpoint_neffs(wl_um, wvg, n_modes, z_ex, verbose)
+
+    n_cut_front = _cutoff_index(wvg, "front")
+    n_cut_back  = _cutoff_index(wvg, "back")
+
+    # ---- skipped modes: weakest-bound at the multimode input ----
+    if n_expected_guided is not None:
+        n_skip  = max(0, n_modes - int(n_expected_guided))
+        skipped = sorted(int(i) for i in np.argsort(n0)[:n_skip])
+        for i in skipped:
+            if verbose and (n0[i] - n_cut_front) > cutoff_margin and \
+               (nL[i] - n_cut_back) > cutoff_margin:
+                print(f"    [warn] mode {i} skipped to meet "
+                      f"n_expected_guided={n_expected_guided} but is above "
+                      f"cutoff at both ends -- check the expected count.")
+    else:
+        skipped = sorted(int(i) for i in range(n_modes)
+                         if (n0[i] - n_cut_front) <= cutoff_margin)
+    skipped_set = set(skipped)
+
+    # ---- front degenerate groups: multiplets at z=0 ----
+    degen_front: List[List[int]] = []
+    for run in _multiplets(n0, degen_atol):
+        if len(run) < 2:
+            continue
+        if any(i not in skipped_set for i in run):   # has a kept member
+            degen_front.append(sorted(run))
+
+    # ---- back degenerate groups: multiplets at z=z_ex, kept modes only ----
+    degen_back: List[List[int]] = []
+    for run in _multiplets(nL, degen_atol):
+        kept = [i for i in run if i not in skipped_set]
+        if len(kept) >= 2:
+            degen_back.append(sorted(kept))
+
+    if verbose:
+        _print_mode_bookkeeping_table(
+            n0, nL, n_cut_front, n_cut_back, degen_front, degen_back, skipped)
+
+    return degen_front, degen_back, skipped
+
+
+def _print_mode_bookkeeping_table(
+    n0: np.ndarray,
+    nL: np.ndarray,
+    n_cut_front: float,
+    n_cut_back: float,
+    degen_front: List[List[int]],
+    degen_back: List[List[int]],
+    skipped: Sequence[int],
+) -> None:
+    fg_id = {m: gid for gid, g in enumerate(degen_front) for m in g}
+    bg_id = {m: gid for gid, g in enumerate(degen_back) for m in g}
+    sk = set(skipped)
+    print("    mode |  n_eff@0    n_eff@end | head_in   head_out | frontG backG | state")
+    print("    -----+----------------------+--------------------+--------------+------")
+    for m in range(len(n0)):
+        hi, ho = n0[m] - n_cut_front, nL[m] - n_cut_back
+        print(f"    {m:4d} | {n0[m]:9.6f}  {nL[m]:9.6f} | {hi:+.2e} {ho:+.2e} "
+              f"| {str(fg_id.get(m,'.')):>5} {str(bg_id.get(m,'.')):>4} "
+              f"| {'SKIP' if m in sk else 'guided'}")
+    print(f"    cutoff index: front(jacket)={n_cut_front:.6f}  back(clad)={n_cut_back:.6f}")
+    print(f"    degen_groups front = {degen_front}")
+    print(f"    degen_groups back  = {degen_back}")
+    print(f"    skipped_modes      = {sorted(skipped)}")
+
+
+def diagnose_mode_bookkeeping(
+    base_params: dict,
+    wavelength_nm: float,
+    *,
+    PL_N: Optional[PhotonicLantern] = None,
+    n_modes: int = 20,
+    z_split: Optional[float] = None,
+    **infer_kwargs,
+) -> Tuple[List[List[int]], List[List[int]], List[int]]:
+    """
+    Notebook convenience: run infer_lantern_mode_bookkeeping() for one
+    wavelength without characterising anything. Use it to inspect the
+    inferred structure for every wavelength you plan to (re)characterise
+    before committing the CPU time.
+    """
+    p_lambda = scale_params_to_wavelength(base_params, wavelength_nm)
+    PL_N     = PL_N if PL_N is not None else build_lantern_geometry(p_lambda)
+    z_ex     = p_lambda["z_ex"]
+    _z_split = z_split if z_split is not None else z_ex / 2.0
+    return infer_lantern_mode_bookkeeping(
+        p_lambda["wl"], PL_N, n_modes, _z_split,
+        n_expected_guided=base_params["n_output_positions"],
+        z_ex=z_ex, verbose=True, **infer_kwargs,
+    )
+
+
+def _characterization_cached(prop: Propagator, tag: str) -> bool:
+    """True iff the three files Propagator.load(tag) needs are on disk."""
+    base = getattr(prop, "save_dir", "./data")
+    return all(
+        os.path.exists(os.path.join(base, sub, f"{sub}_{tag}.npy"))
+        for sub in ("eigenvalues", "eigenmodes", "zvals")
+    )
+
 
 def build_and_characterize_lantern_at_wavelength(
     base_params: dict,
@@ -308,6 +573,7 @@ def build_and_characterize_lantern_at_wavelength(
     z_split: Optional[float] = None,
     cache_prefix: str = "port",
     PL_N: Optional[PhotonicLantern] = None,
+    auto_mode_bookkeeping: bool = False,
     verbose: bool = True,
 ) -> Tuple[dict, ChainPropagator]:
     """
@@ -329,15 +595,19 @@ def build_and_characterize_lantern_at_wavelength(
     n_modes : int
         Number of local modes tracked by the Propagator.
     skipped_modes, degen_groups : optional overrides
-        Default reproduces the single-wavelength pipeline's configuration
-        ([18] skipped; the front-half degenerate LP-mode pairs grouped).
-        Override if a different wavelength needs a different degeneracy
-        structure -- mode crossings can shift position with wavelength
-        near cutoff, so a pair degenerate at 800 nm may not be degenerate
-        at 750 nm, or a new crossing may appear. If you're characterizing
-        an unfamiliar wavelength for the first time, it's worth repeating
-        the compute_neffs() sanity check from cbeam's 19-port example
-        before committing to these defaults.
+        Explicit overrides win over everything. Default reproduces the
+        single-wavelength pipeline's configuration ([18] skipped; the
+        front-half degenerate LP-mode pairs grouped) -- valid at 800 nm,
+        NOT across wavelength (LP degeneracies split, avoided crossings
+        move as V changes). For any wavelength away from 800 nm, either
+        pass explicit lists or set auto_mode_bookkeeping=True.
+    auto_mode_bookkeeping : bool
+        When True and neither skipped_modes nor degen_groups is given,
+        and this wavelength is about to be characterised from scratch
+        (no cache), derive degen_groups (front + back separately) and
+        skipped_modes automatically from a compute_neffs() probe -- see
+        infer_lantern_mode_bookkeeping(). No effect when the cache is
+        already present (the probe would be wasted).
     z_split : float or None
         z coordinate separating the "front" and "back" Propagator
         segments. Defaults to base_params["z_ex"] / 2, matching the
@@ -358,13 +628,7 @@ def build_and_characterize_lantern_at_wavelength(
         Copy of base_params with wl / wavelength_nm set for this wavelength.
     prop12   : ChainPropagator
     """
-    p_lambda = dict(base_params)
     p_lambda = scale_params_to_wavelength(base_params, wavelength_nm)
-
-#    p_lambda["wl"] = wavelength_nm / 1000.0
-#    p_lambda["wavelength_nm"] = wavelength_nm
-#    ref_wl_nm = base_params.get("wavelength_nm", 800.0)
-#    p_lambda["pixel_scale_um"] = base_params["pixel_scale_um"] * (wavelength_nm / ref_wl_nm)
 
     z_ex = p_lambda["z_ex"]
     _z_split = z_split if z_split is not None else z_ex / 2.0
@@ -374,27 +638,47 @@ def build_and_characterize_lantern_at_wavelength(
 
     PL_N = PL_N if PL_N is not None else build_lantern_geometry(p_lambda)
 
-
-
-    _skipped = list(skipped_modes) if skipped_modes is not None else [18]
-    _skipped_set = set(_skipped)   # used only for active_modes computation below
-
-    _degen_front = degen_groups if degen_groups is not None else default_degenerate_groups_front[base_params["nrings"]]
-    _degen_back = [[i for i in range(n_modes) if i not in _skipped_set]]
-
     prop1 = Propagator(p_lambda["wl"], PL_N, n_modes)
+    prop2 = Propagator(p_lambda["wl"], PL_N, n_modes)
+
+    _front_tag, _back_tag = f"{tag}_front", f"{tag}_back"
+    _explicit = (skipped_modes is not None) or (degen_groups is not None)
+    _will_solve = not (_characterization_cached(prop1, _front_tag)
+                       and _characterization_cached(prop2, _back_tag))
+
+    if auto_mode_bookkeeping and not _explicit and _will_solve:
+        if verbose:
+            print(f"    [{tag}] auto_mode_bookkeeping: probing n_eff(z) to derive "
+                  f"degen_groups / skipped_modes for this wavelength ...")
+        _degen_front, _degen_back, _skipped = infer_lantern_mode_bookkeeping(
+            p_lambda["wl"], PL_N, n_modes, _z_split,
+            n_expected_guided=base_params["n_output_positions"],
+            z_ex=z_ex, verbose=verbose,
+        )
+        _skipped_set = set(_skipped)
+    else:
+        _skipped = list(skipped_modes) if skipped_modes is not None else [18]
+        _skipped_set = set(_skipped)
+        # Copy the module-global grouping so an in-place mutation by the
+        # propagator can't poison it for the next wavelength in a loop
+        # (matches build_and_characterize_lantern in the single-wl pipeline).
+        _degen_front = (
+            [list(g) for g in degen_groups] if degen_groups is not None
+            else [list(g) for g in default_degenerate_groups_front[base_params["nrings"]]]
+        )
+        _degen_back = [[i for i in range(n_modes) if i not in _skipped_set]]
+
     prop1.degen_groups = _degen_front
     prop1.skipped_modes = _skipped
-    _load_or_characterize(prop1, f"{tag}_front", 0.0, _z_split, verbose=verbose)
+    _load_or_characterize(prop1, _front_tag, 0.0, _z_split, verbose=verbose)
 
-    prop2 = Propagator(p_lambda["wl"], PL_N, n_modes)
     prop2.skipped_modes = _skipped
     prop2.degen_groups = _degen_back
     # Must happen before load/characterize: the back segment's initial
     # eigenbasis is bootstrapped from the front segment's final one,
     # whether the front segment was just loaded or just solved.
     prop2.load_init_conds(prop1)
-    _load_or_characterize(prop2, f"{tag}_back", _z_split, z_ex, verbose=verbose)
+    _load_or_characterize(prop2, _back_tag, _z_split, z_ex, verbose=verbose)
 
     return p_lambda, ChainPropagator([prop1, prop2])
 
@@ -514,6 +798,7 @@ class MultiWavelengthPropagationPipeline:
         field_gen_on_gpu: bool = False,
         field_gen_chunk_size: Optional[int] = default_gen_chunk_size,
         cache_engines: bool = False,
+        auto_mode_bookkeeping: bool = False,
         verbose: bool = True,
     ):
         self.base_params = base_params
@@ -524,6 +809,12 @@ class MultiWavelengthPropagationPipeline:
         self.field_gen_on_gpu = field_gen_on_gpu
         self.field_gen_chunk_size = field_gen_chunk_size
         self.cache_engines = cache_engines
+        # Passed to build_and_characterize_lantern_at_wavelength: when a
+        # wavelength has to be characterised from scratch, derive its
+        # degen_groups / skipped_modes from an n_eff probe instead of
+        # reusing the 800 nm hard-coded config. No effect on cached
+        # wavelengths.
+        self.auto_mode_bookkeeping = auto_mode_bookkeeping
         self.verbose = verbose
 
         # DM mask / influence-function matrix -- wavelength independent,
@@ -558,7 +849,8 @@ class MultiWavelengthPropagationPipeline:
     def _build_engine(self, wl: float) -> WavelengthEngine:
         """Build a single wavelength's ChainPropagator + BatchPropagationPipeline."""
         p_lambda, prop12 = build_and_characterize_lantern_at_wavelength(
-            self.base_params, wl, PL_N=self._shared_PL_N, verbose=self.verbose)
+            self.base_params, wl, PL_N=self._shared_PL_N,
+            auto_mode_bookkeeping=self.auto_mode_bookkeeping, verbose=self.verbose)
 
         try:
             # field_gen_pupil_template reuses the wavelength-independent
@@ -613,7 +905,23 @@ class MultiWavelengthPropagationPipeline:
         Returns
         -------
         spectra_complex : ndarray, shape (n_wavelengths_native, n_fields, n_fibers), complex128
-            Complex per-fiber modal coefficient at each native wavelength.
+            Complex per-fiber modal coefficient at each native wavelength,
+            *scaled by the per-field input coupling efficiency* so that
+            np.abs(...)**2 is a throughput-bearing flux that stays
+            comparable across fields and across wavelengths.
+
+            generate_batch_modal_coefficients() renormalises every input
+            field to unit L2 norm, which by itself discards how much of the
+            focal-plane PSF actually coupled into the lantern (this varies
+            strongly as an aberration walks the PSF off the multimode
+            face, and with wavelength as the PSF breathes relative to
+            rclad). We recover that here by multiplying each field's
+            channel amplitudes by its coupling efficiency `eff` (the L2
+            norm of the projected field *before* that renormalisation).
+            `eff` is a consistent relative measure, not an absolute
+            "fraction of incident power" -- use it for comparisons, not as
+            an absolute transmission.
+
             Power is NOT taken here -- phase is preserved in case you want
             it (e.g. to sanity-check mode purity); take np.abs(...)**2 for
             detector-plane flux.
@@ -633,15 +941,13 @@ class MultiWavelengthPropagationPipeline:
                 if self.cache_engines:
                     self.engines[float(wl)] = engine
 
-            u0_batch = engine.pipeline.generate_batch_modal_coefficients(
+            u0_batch, eff_batch = engine.pipeline.generate_batch_modal_coefficients(
                 aberration_coeff_batch, use_gpu=use_gpu, chunk_size=gen_chunk_size,
+                return_coupling_efficiency=True,
             )
 
             uf_batch, _, _ = engine.pipeline.propagate_batch(u0_batch, chunk_size=prop_chunk_size)
             # Convert from FEM-eigenmode basis to per-core channel basis
-
-            _skipped_set = set(engine.prop12.skipped_modes)  # {18}
-            active_modes = [i for i in range(engine.prop12.Nmax) if i not in _skipped_set][:self.n_fibers]
 
             # shape (n_fields, n_modes) → (n_fields, n_fibers) in per-core order
             uf_channel = np.stack([
@@ -649,14 +955,14 @@ class MultiWavelengthPropagationPipeline:
                 for k in range(uf_batch.shape[0])
             ])
 
+            # Fold the discarded input coupling efficiency back in: u0_batch
+            # was renormalised to unit norm, propagation is (near-)unitary,
+            # so the physical channel amplitude scales linearly with the
+            # amount of pupil field that actually coupled in -- eff_batch.
+            eff_batch = np.asarray(eff_batch, dtype=np.float64).reshape(-1)
+            uf_channel = uf_channel * eff_batch[:, None]
 
-            spectra_complex[i, :, :] = uf_channel[:, :self.n_fibers]  # or active_modes slice
-
-            #uf_channel = np.array([engine.prop12.to_channel_basis(uf_batch[k]) for k in range(uf_batch.shape[0])])
-
-            #spectra_complex[i, :, :] = np.abs(uf_channel[:, :self.n_fibers])  # or use active_modes
-            # alternative
-            # spectra_complex[i, :, :] = uf_batch[:, active_modes]
+            spectra_complex[i, :, :] = uf_channel[:, :self.n_fibers]
 
             if not self.cache_engines:
                 # Drop the heavy per-wavelength state (mesh, mode-field

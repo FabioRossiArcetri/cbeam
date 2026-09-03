@@ -377,7 +377,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     #
     # pixel_scale_um is then fixed by requiring the Airy radius to equal
     # psf_fill_factor * rclad in physical units.
-    psf_fill_factor = 0.85
+    psf_fill_factor = 0.35
     r_airy_px = 1.22 * params["pad_factor"]
     params["pixel_scale_um"] = psf_fill_factor * params["rclad"] / r_airy_px
 
@@ -889,7 +889,11 @@ class BatchPropagationPipeline:
     def _process_chunk(self, coeff_chunk, fg, proj, use_gpu):
         """Run the field-generation pipeline on a single coefficient chunk.
 
-        Returns a plain numpy array of shape (chunk_size, n_modes).
+        Returns ``(u0_chunk, eff_chunk)`` as plain numpy arrays of shape
+        ``(chunk_size, n_modes)`` and ``(chunk_size,)`` respectively.
+        ``eff_chunk`` is the L2 norm of each projected vector *before*
+        normalisation -- i.e. the input coupling efficiency (amplitude, not
+        power) for that field; ``u0_chunk`` itself is unit-norm.
         All intermediate arrays are local to this call and are released
         when it returns.
         """
@@ -900,12 +904,13 @@ class BatchPropagationPipeline:
             E_lantern = fg.apply_ef_to_lantern(Ef_input)
         Ef_focal_mesh   = fg.resample_to_mesh(E_lantern)
         u0_chunk, eff = proj.project_batch(Ef_focal_mesh)
-        return np.asarray(u0_chunk)
+        return np.asarray(u0_chunk), np.asarray(eff)
 
     # ------------------------------------------------------------------
     def generate_batch_modal_coefficients(self, aberration_coeff_batch,
                                           use_gpu=None,
-                                          chunk_size=None):
+                                          chunk_size=None,
+                                          return_coupling_efficiency=False):
         """
         Generate batch modal coefficients from aberration configurations.
 
@@ -935,11 +940,24 @@ class BatchPropagationPipeline:
             - ``None``  — use the instance default (``field_gen_chunk_size``).
             - Positive int — use that chunk size.
             - ``0`` or negative — disable chunking (process whole batch).
+        return_coupling_efficiency : bool, optional (default False)
+            When True, also return the per-field input coupling efficiency
+            (see below).  Kept opt-in so existing callers that unpack a
+            single return value keep working.
 
         Returns
         -------
         u0_batch : np.ndarray, shape (n_configs, n_modes), complex128
-            Normalised modal coefficients, always a plain numpy array.
+            Normalised (unit-L2-norm) modal coefficients, always a plain
+            numpy array.
+        eff_batch : np.ndarray, shape (n_configs,), float64
+            Only returned when ``return_coupling_efficiency=True``.  L2 norm
+            of each projected vector *before* normalisation -- i.e. the
+            fraction of pupil-field amplitude that coupled into the tracked
+            input modes.  ``u0_batch`` alone discards this, so any power
+            spectrum that must stay comparable across fields or wavelengths
+            has to be scaled by ``eff_batch**2`` (power) / ``eff_batch``
+            (amplitude).
         """
         # ------------------------------------------------------------------
         # Resolve backend choice.
@@ -995,22 +1013,32 @@ class BatchPropagationPipeline:
         if _chunk_size is None or _chunk_size >= n_configs:
             # Single pass — no chunking overhead.
             coeff_chunk = self._to_device(coeff_np, _use_gpu)
-            return self._process_chunk(coeff_chunk, fg, proj, _use_gpu)
+            u0_batch, eff_batch = self._process_chunk(
+                coeff_chunk, fg, proj, _use_gpu)
+            if return_coupling_efficiency:
+                return u0_batch, eff_batch
+            return u0_batch
 
         print(f"  Generating modal coefficients for {n_configs} fields "
               f"(chunk_size={_chunk_size}, "
               f"device={'GPU' if _use_gpu else 'CPU'}) ...", flush=True)
 
-        u0_chunks = []
+        u0_chunks  = []
+        eff_chunks = []
         for start in range(0, n_configs, _chunk_size):
             end         = min(start + _chunk_size, n_configs)
             coeff_chunk = self._to_device(coeff_np[start:end], _use_gpu)
-            u0_chunk    = self._process_chunk(coeff_chunk, fg, proj, _use_gpu)
+            u0_chunk, eff_chunk = self._process_chunk(
+                coeff_chunk, fg, proj, _use_gpu)
             u0_chunks.append(u0_chunk)
+            eff_chunks.append(eff_chunk)
             print(f"    field-gen chunk {start}–{end-1} done.", flush=True)
 
         print("  Field generation complete.")
-        return np.concatenate(u0_chunks, axis=0)
+        u0_batch = np.concatenate(u0_chunks, axis=0)
+        if return_coupling_efficiency:
+            return u0_batch, np.concatenate(eff_chunks, axis=0)
+        return u0_batch
 
     # ------------------------------------------------------------------
     @staticmethod
