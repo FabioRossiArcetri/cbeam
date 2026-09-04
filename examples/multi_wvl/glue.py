@@ -31,8 +31,3 @@ def build_spectral_config_from_wavelength_grid(wl_nm: np.ndarray, **overrides):
     )
     cfg_kwargs.update(overrides)
     return SpectralConfig(**cfg_kwargs)
-
-
-# =====================================================================
-# LAYER 4: EXAMPLE USAGE
-# =====================================================================
