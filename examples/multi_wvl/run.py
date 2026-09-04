@@ -42,7 +42,8 @@ def example_multiwavelength_propagation():
     )
 
     n_total_modes = mwp.num_modes
-    coeff_matrix = create_random_aberration_configs(n=8, m=n_total_modes, minv=-100.0, maxv=100.0)
+    coeff_matrix, _labels = create_random_aberration_configs(
+        n=8, m=n_total_modes, minv=-100.0, maxv=100.0)
 
     # Fine output grid for the dispersed spectra (interpolated from the
     # coarse native grid above).

@@ -55,7 +55,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     #
     # pixel_scale_um is then fixed by requiring the Airy radius to equal
     # psf_fill_factor * rclad in physical units.
-    psf_fill_factor = 0.35
+    psf_fill_factor = 0.30
     r_airy_px = 1.22 * params["pad_factor"]
     params["pixel_scale_um"] = psf_fill_factor * params["rclad"] / r_airy_px
 
@@ -64,7 +64,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
 
 def create_sparse_aberration_configs_mono(n, m, minv, maxv):
     """
-    Generate *n* random aberration configurations where each configuration 
+    Generate *n* random aberration configurations where each configuration
     has only one active mode (value) that varies, while others remain zero.
 
     Args:
@@ -74,21 +74,19 @@ def create_sparse_aberration_configs_mono(n, m, minv, maxv):
         maxv (float): Maximum amplitude (nm).
 
     Returns:
-        np.ndarray of shape (n, m), dtype float64.
+        coeff_matrix : np.ndarray of shape (n, m), dtype float64.
+        labels       : list[str] of length n, e.g. "mode 3 | 150.0 nm"
+                       (same convention as create_ramp_aberration_configs).
     """
-    # Initialize all with zeros
     configs = np.zeros((n, m), dtype=np.float64)
-    
-    # Pick a random mode index for each of the n configurations
     random_mode_indices = np.random.randint(0, m, size=n)
-    
-    # Generate the random amplitudes for those specific positions
     amplitudes = np.random.uniform(minv, maxv, size=n)
-    
-    # Assign the values
     configs[np.arange(n), random_mode_indices] = amplitudes
-    
-    return configs
+
+    labels = [f"mode {int(i)} | {a:.1f} nm"
+              for i, a in zip(random_mode_indices, amplitudes)]
+    return configs, labels
+
 
 def create_random_aberration_configs(n, m, minv, maxv):
     """
@@ -101,9 +99,15 @@ def create_random_aberration_configs(n, m, minv, maxv):
         maxv (float): Maximum amplitude (nm).
 
     Returns:
-        np.ndarray of shape (n, m), dtype float64.
+        coeff_matrix : np.ndarray of shape (n, m), dtype float64.
+        labels       : list[str] of length n, "random #k | rms <v> nm"
+                       (no single active mode, so the label reports the
+                       per-config RMS amplitude instead).
     """
-    return np.random.uniform(minv, maxv, (n, m)).astype(np.float64)
+    configs = np.random.uniform(minv, maxv, (n, m)).astype(np.float64)
+    labels = [f"random #{k} | rms {np.sqrt(np.mean(row ** 2)):.0f} nm"
+              for k, row in enumerate(configs)]
+    return configs, labels
 
 
 def create_ramp_aberration_configs(modes, n_steps, minv, maxv):

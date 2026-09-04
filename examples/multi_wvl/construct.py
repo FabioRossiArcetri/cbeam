@@ -218,7 +218,7 @@ def build_and_characterize_lantern_at_wavelength(
             print(f"    [{tag}] auto_mode_bookkeeping: probing n_eff(z) to derive "
                   f"degen_groups / skipped_modes for this wavelength ...")
         _degen_front, _degen_back, _skipped = infer_lantern_mode_bookkeeping(
-            p_lambda["wl"], PL_N, n_modes, _z_split,
+            p_lambda["wl"], PL_N, n_modes,
             n_expected_guided=base_params["n_output_positions"],
             z_ex=z_ex, verbose=verbose,
         )

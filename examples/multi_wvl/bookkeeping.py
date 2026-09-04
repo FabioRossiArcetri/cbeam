@@ -88,18 +88,21 @@ def infer_lantern_mode_bookkeeping(
     wl_um: float,
     wvg,
     n_modes: int,
-    z_split: float,           # kept for signature stability; not needed here
     *,
     n_expected_guided: Optional[int] = None,
     z_ex: Optional[float] = None,
     degen_atol: float = 1e-5,
     cutoff_margin: float = 5e-5,
     verbose: bool = True,
-    n_probe: Optional[int] = None,   # accepted & ignored (old API)
 ) -> Tuple[List[List[int]], List[List[int]], List[int]]:
     """
     Derive ``(degen_groups_front, degen_groups_back, skipped_modes)`` for
     the lantern at one wavelength from two endpoint FEM solves.
+
+    (Earlier versions took a ``z_split`` positional and an ``n_probe``
+    keyword for a partial ``compute_neffs`` sweep; the current implementation
+    uses two clean endpoint solves and needs neither.  ``diagnose_mode_
+    bookkeeping`` still swallows those keywords for old notebook cells.)
 
     Parameters
     ----------
@@ -109,9 +112,6 @@ def infer_lantern_mode_bookkeeping(
         The (wavelength-independent) geometry.
     n_modes : int
         Nmax tracked by the Propagator.
-    z_split : float
-        Unused (endpoint solves don't need it); kept so callers that pass
-        it positionally keep working.
     n_expected_guided : int or None
         Number of genuinely guided modes (= number of output cores). When
         given, exactly ``n_modes - n_expected_guided`` modes are skipped
@@ -220,7 +220,6 @@ def diagnose_mode_bookkeeping(
     *,
     PL_N: Optional[PhotonicLantern] = None,
     n_modes: int = 20,
-    z_split: Optional[float] = None,
     **infer_kwargs,
 ) -> Tuple[List[List[int]], List[List[int]], List[int]]:
     """
@@ -229,13 +228,16 @@ def diagnose_mode_bookkeeping(
     inferred structure for every wavelength you plan to (re)characterise
     before committing the CPU time.
     """
+    # absorb the old no-op knobs so existing notebook cells that still pass
+    # `n_probe=` / `z_split=` keep working (see infer_lantern_mode_bookkeeping)
+    infer_kwargs.pop("n_probe", None)
+    infer_kwargs.pop("z_split", None)
+
     p_lambda = scale_params_to_wavelength(base_params, wavelength_nm)
     PL_N     = PL_N if PL_N is not None else build_lantern_geometry(p_lambda)
-    z_ex     = p_lambda["z_ex"]
-    _z_split = z_split if z_split is not None else z_ex / 2.0
     return infer_lantern_mode_bookkeeping(
-        p_lambda["wl"], PL_N, n_modes, _z_split,
+        p_lambda["wl"], PL_N, n_modes,
         n_expected_guided=base_params["n_output_positions"],
-        z_ex=z_ex, verbose=True, **infer_kwargs,
+        z_ex=p_lambda["z_ex"], verbose=True, **infer_kwargs,
     )
 
