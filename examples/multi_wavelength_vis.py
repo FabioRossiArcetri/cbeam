@@ -27,7 +27,7 @@ def plot_fiber_spectra(
     fiber_indices: Optional[Sequence[int]] = None,
     ax=None,
     title: Optional[str] = None,
-    plotSum: bool = True
+    plot_sum: bool = True,
 ):
     """
     Overlay per-fiber power spectra for one field on a single axes.
@@ -40,6 +40,12 @@ def plot_fiber_spectra(
     fiber_indices : sequence of int, optional
         Which fibers to plot. Defaults to all fibers (can get busy for
         19 -- use plot_spectra_grid() for a clearer all-fiber view).
+    ax : matplotlib Axes, optional
+        Draw onto this axes; if None a new figure is made and shown.
+    title : str, optional
+        Axes title; defaults to "Field <field_idx> -- per-fiber spectra".
+    plot_sum : bool, default True
+        Also overlay the all-cores total as a dashed black line.
     """
     n_fibers = power_spectra.shape[2]
     if fiber_indices is None:
@@ -55,7 +61,7 @@ def plot_fiber_spectra(
         ax.plot(wl_nm, power_spectra[:, field_idx, fiber_idx],
                  label=f"Fiber {fiber_idx}", color=color, linewidth=1.2)
 
-    if plotSum:
+    if plot_sum:
         total = power_spectra[:, field_idx, :].sum(axis=1)
         ax.plot(wl_nm, total, label="Sum (all cores)",
                  color="black", linewidth=1.8, linestyle="--")
