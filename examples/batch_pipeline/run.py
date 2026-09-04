@@ -42,18 +42,16 @@ def main_batch_propagation():
 
     mode_indices  = [0, 3, 5]
     amplitudes_nm = [0.0, 100.0, 300.0, 600.0]
-    aberration_configs = [
-        {'mode_idx': m, 'amplitude_nm': a}
-        for m in mode_indices for a in amplitudes_nm
-    ]
-    print(f"      Batch size: {len(aberration_configs)} fields")
+    # One config per (mode, amplitude) pair: mode index -> column, amplitude -> value.
+    mode_amp_pairs = [(m, a) for m in mode_indices for a in amplitudes_nm]
+    print(f"      Batch size: {len(mode_amp_pairs)} fields")
     print(f"      Modes: {mode_indices}, Amplitudes (nm): {amplitudes_nm}")
 
     print(f"\n[5/5] Generating and propagating batch...")
     n_total      = pipeline._field_gen_np.num_modes
-    coeff_matrix = np.zeros((len(aberration_configs), n_total), dtype=np.float64)
-    for k, cfg in enumerate(aberration_configs):
-        coeff_matrix[k, cfg['mode_idx']] = cfg['amplitude_nm']
+    coeff_matrix = np.zeros((len(mode_amp_pairs), n_total), dtype=np.float64)
+    for k, (mode_idx, amp) in enumerate(mode_amp_pairs):
+        coeff_matrix[k, mode_idx] = amp
 
     # chunk_size=None → use the instance default (field_gen_chunk_size=64).
     # Pass an explicit int to override, e.g. chunk_size=32 for tighter memory.
@@ -71,8 +69,8 @@ def main_batch_propagation():
     uf_2d_batch, X_plot, Y_plot = pipeline.interpolate_output_to_grid(E_output_batch)
     print(f"      Output grid batch shape: {uf_2d_batch.shape}")
 
-    titles = [f"Mode {c['mode_idx']}, {c['amplitude_nm']:.0f} nm"
-              for c in aberration_configs]
+    titles = [f"Mode {mode_idx}, {amp:.0f} nm"
+              for mode_idx, amp in mode_amp_pairs]
 
     print(f"\n[Results] Visualising batch output...")
     visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles)
@@ -89,7 +87,7 @@ def main_batch_propagation():
         'uf_2d_batch':    uf_2d_batch,
         'zs':             zs,
         'us_batch':       us_batch,
-        'configs':        aberration_configs,
+        'configs':        mode_amp_pairs,
         'pipeline':       pipeline,
     }
 

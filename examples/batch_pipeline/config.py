@@ -1,12 +1,21 @@
 # Auto-split from the former single-file batch_propagation_pipeline.py.
 """Simulation-parameter builder and aberration-configuration generators."""
 from __future__ import annotations
+import os
 import numpy as np
 
 from cbeam.waveguide import hex_ring_positions
 
 from .constants import (
     L1, L2, N_RINGS, DEFAULT_WAVELENGTH_UM,
+)
+
+# Influence-function FITS (the ANDES DM modal basis).  This default path only
+# exists on the machine the pipeline was developed on; point CBEAM_IFUNC_FILE
+# at your own copy to run anywhere else.
+DEFAULT_IFUNC_FILE = (
+    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/'
+    'ANDES_400pix_all_modes.fits'
 )
 
 
@@ -32,8 +41,8 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
         "core_res":      16,
         "clad_res":      60,
         "jack_res":      30,
-        "pixel_scale_um": 1,  # Physical scale of each pixel in the padded FFT grid (μm/px)
-        "ifunc_file":    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/ANDES_400pix_all_modes.fits',
+        # "pixel_scale_um" (μm/px in the padded FFT grid) is derived below.
+        "ifunc_file":    os.environ.get("CBEAM_IFUNC_FILE", DEFAULT_IFUNC_FILE),
     }
     params["rcore"]  = 1.8 / params["taper_factor"]
     params["ncore"]  = params["nclad"] + 8.8e-3

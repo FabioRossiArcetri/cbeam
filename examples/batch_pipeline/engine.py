@@ -10,7 +10,6 @@ from scipy.spatial import Delaunay
 
 from cbeam.waveguide import PhotonicLantern
 from cbeam.propagator import Propagator, ChainPropagator
-from wavesolve.fe_solver import construct_B
 
 from .constants import (
     backend, jax, jnp, _jax_device,
@@ -108,6 +107,8 @@ def build_and_characterize_lantern(p, reuse_cache=False):
 
 def get_waveguide_properties(prop12, mesh_z=0):
     """Extract waveguide modal properties at a given z position."""
+    from wavesolve.fe_solver import construct_B  # only used here
+
     p_segment  = prop12.get_prop(mesh_z)
     mesh_obj   = p_segment.mesh
     p_segment.wvg.assign_IOR()          # ensure wvg.IOR_dict is populated
@@ -125,8 +126,8 @@ def get_waveguide_properties(prop12, mesh_z=0):
         active_modes = active_modes.T
 
     n_modes   = active_modes.shape[0]
-    points_2d = np.stack((mesh_obj.points[:, 0], mesh_obj.points[:, 1]), axis=-1)
-        
+    points_2d = np.ascontiguousarray(mesh_obj.points[:, :2])
+
     B     = construct_B(mesh_obj, sparse=True)
     areas = np.array(B.diagonal())
     return {
@@ -290,10 +291,12 @@ class IncidentFieldGenerator:
         self.iy1 = self.xp.asarray(iy1)
         self.ix0 = self.xp.asarray(ix0)
         self.ix1 = self.xp.asarray(ix1)
-        self.w00 = self.xp.asarray((wy0 * wx0 * valid)[:, None])
-        self.w01 = self.xp.asarray((wy0 * wx1 * valid)[:, None])
-        self.w10 = self.xp.asarray((wy1 * wx0 * valid)[:, None])
-        self.w11 = self.xp.asarray((wy1 * wx1 * valid)[:, None])
+        # 1-D (n_pts,) weights; they broadcast against the (n_fields, n_pts)
+        # sampled-value arrays in resample_to_mesh on the trailing axis.
+        self.w00 = self.xp.asarray(wy0 * wx0 * valid)
+        self.w01 = self.xp.asarray(wy0 * wx1 * valid)
+        self.w10 = self.xp.asarray(wy1 * wx0 * valid)
+        self.w11 = self.xp.asarray(wy1 * wx1 * valid)
         
         print(f"  Valid interpolation points: {np.sum(valid)} / {len(valid)}")
 
@@ -344,8 +347,8 @@ class IncidentFieldGenerator:
         val01 = E_lantern_batch[:, self.iy0, self.ix1]
         val10 = E_lantern_batch[:, self.iy1, self.ix0]
         val11 = E_lantern_batch[:, self.iy1, self.ix1]
-        return (val00 * self.w00.T + val01 * self.w01.T +
-                val10 * self.w10.T + val11 * self.w11.T)
+        return (val00 * self.w00 + val01 * self.w01 +
+                val10 * self.w10 + val11 * self.w11)
 
 
 class BatchPropagationPipeline:
@@ -419,11 +422,9 @@ class BatchPropagationPipeline:
         if backend == 'jax' and field_gen_on_gpu:
             self._build_jax_field_gen()
 
-        # Delaunay cache for output interpolation.
+        # Delaunay cache for output interpolation; filled lazily by
+        # interpolate_output_to_grid() the first time each resolution is used.
         self._delaunay_cache = {}
-        # not needed:
-        # self._delaunay_cache[DEFAULT_GRID_RESOLUTION] = \
-        #     self._precompute_delaunay_grid(DEFAULT_GRID_RESOLUTION)
 
     # ------------------------------------------------------------------
     def _build_jax_field_gen(self):
@@ -717,10 +718,10 @@ class BatchPropagationPipeline:
         print(f"  Propagating {n_fields} fields "
               f"(chunk_size={chunk_size}) ...", flush=True)
 
-        uf_chunks   = []
-        us_chunks   = []
-        zs_last     = None
-        multi_chunk = (n_fields > chunk_size)
+        uf_chunks     = []
+        zs_last       = None
+        us_grid_single = None   # full trajectory, kept only for single-chunk runs
+        multi_chunk   = (n_fields > chunk_size)
 
         for start in range(0, n_fields, chunk_size):
             end   = min(start + chunk_size, n_fields)
@@ -736,7 +737,8 @@ class BatchPropagationPipeline:
             zs_last = np.asarray(zs)
 
             if not multi_chunk:
-                us_chunks.append(np.asarray(us_grid))
+                # single-chunk path: this loop body runs exactly once
+                us_grid_single = np.asarray(us_grid)
 
             print(f"    propagation chunk {start}–{end-1} done.", flush=True)
 
@@ -746,9 +748,10 @@ class BatchPropagationPipeline:
             us_batch = None
             print("  (us_batch not returned for multi-chunk runs to save memory)")
         else:
-            us_grid_full = np.concatenate(us_chunks, axis=0)
-            us_batch = (np.transpose(us_grid_full, (1, 0, 2))
-                        if us_grid_full.ndim == 3 else us_grid_full)
+            # prop12.propagate returns the trajectory as (n_z, n_fields, n_modes);
+            # transpose to the (n_fields, n_z, n_modes) layout this method promises.
+            us_batch = (np.transpose(us_grid_single, (1, 0, 2))
+                        if us_grid_single.ndim == 3 else us_grid_single)
 
         print("  Batch propagation complete.")
         return uf_batch, zs_last, us_batch

@@ -121,12 +121,21 @@ def _load_or_characterize(
             print(f"    [{tag}] characterization complete and cached.")
 
 
+# On-disk layout written by cbeam's Propagator.characterize(save=True, tag=...)
+# and read back by Propagator.load(tag): one "<sub>/<sub>_<tag>.npy" file per
+# item, under the propagator's save_dir.  Mirrored here (rather than exposed by
+# cbeam) so we can cheaply test "is this tag already cached?" without a load();
+# keep in sync if a future cbeam version changes the layout.
+_CACHE_SUBDIRS = ("eigenvalues", "eigenmodes", "zvals")
+_DEFAULT_SAVE_DIR = "./data"
+
+
 def _characterization_cached(prop: Propagator, tag: str) -> bool:
-    """True iff the three files Propagator.load(tag) needs are on disk."""
-    base = getattr(prop, "save_dir", "./data")
+    """True iff the files Propagator.load(tag) needs are already on disk."""
+    base = getattr(prop, "save_dir", None) or _DEFAULT_SAVE_DIR
     return all(
         os.path.exists(os.path.join(base, sub, f"{sub}_{tag}.npy"))
-        for sub in ("eigenvalues", "eigenmodes", "zvals")
+        for sub in _CACHE_SUBDIRS
     )
 
 

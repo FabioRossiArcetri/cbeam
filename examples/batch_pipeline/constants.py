@@ -24,6 +24,7 @@ L2 = 50000
 
 DEFAULT_WAVELENGTH_UM   = 0.8
 DEFAULT_GRID_RESOLUTION = 400
+CALIB_GRID_RESOLUTION   = 400    # grid the mode profile is resampled onto for core-centre calibration
 DEFAULT_SUBPIXEL_N      = 5      # side of the NxN sub-pixel sampling window
 N_RINGS   = 3
 N_SIGNALS = len(hex_ring_positions(N_RINGS, 1.0))   # lantern output cores; 19 for N_RINGS=3

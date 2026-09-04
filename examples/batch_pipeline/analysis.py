@@ -9,7 +9,9 @@ from scipy.interpolate import griddata
 from scipy.ndimage import maximum_filter, map_coordinates
 from scipy.optimize import linear_sum_assignment
 
-from .constants import backend, jax, jnp, N_SIGNALS, DEFAULT_SUBPIXEL_N
+from .constants import (
+    backend, jax, jnp, N_SIGNALS, DEFAULT_SUBPIXEL_N, CALIB_GRID_RESOLUTION,
+)
 
 
 def batch_collect_subpixel_signals(images: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
@@ -79,16 +81,18 @@ def _peak_centroids(intensity_2d, x0, y0, dx, dy, n_expected=N_SIGNALS,
     return sorted(centers, key=lambda p: (np.round(p[1], 2), np.round(p[0], 2)))
 
 
-def calibrate_subpixel_centers(total_modes_profile, mesh_final):
+def calibrate_subpixel_centers(total_modes_profile, mesh_final,
+                               grid_resolution=CALIB_GRID_RESOLUTION):
     """Find core centres to sub-pixel accuracy: resample the mesh profile onto a
-    400x400 grid, then run the shared self-healing peak finder (_peak_centroids).
+    ``grid_resolution`` square grid, then run the shared self-healing peak
+    finder (_peak_centroids).
 
     Returns ``(centers, plot_x_out, plot_y_out, dx, dy)`` -- the grid axes and
     spacing are returned because callers (e.g. visualize_batch_hex_grid_signals)
     reuse them to sample signals at the same centres.
     """
-    plot_x_out = np.linspace(mesh_final.points[:, 0].min(), mesh_final.points[:, 0].max(), 400)
-    plot_y_out = np.linspace(mesh_final.points[:, 1].min(), mesh_final.points[:, 1].max(), 400)
+    plot_x_out = np.linspace(mesh_final.points[:, 0].min(), mesh_final.points[:, 0].max(), grid_resolution)
+    plot_y_out = np.linspace(mesh_final.points[:, 1].min(), mesh_final.points[:, 1].max(), grid_resolution)
     X_plot_out, Y_plot_out = np.meshgrid(plot_x_out, plot_y_out)
     dx = plot_x_out[1] - plot_x_out[0]
     dy = plot_y_out[1] - plot_y_out[0]
@@ -105,10 +109,26 @@ def calibrate_subpixel_centers(total_modes_profile, mesh_final):
 
 
 def map_evaluated_to_ideal_geometry(core_centers, ideal_centers_list):
-    """Calculates optimal rigid alignment (Procrustes SVD) and assigns global indexes."""
+    """Calculates optimal rigid alignment (Procrustes SVD) and assigns global indexes.
+
+    NOTE: the cross-covariance ``H = eval_scaled.T @ ideal_centered`` is built
+    with an *identity* correspondence -- row k of ``core_centers`` is assumed to
+    describe the same physical core as row k of ``ideal_centers_list``.  That
+    only holds because both lists arrive in the same order (``_peak_centroids``
+    returns centres sorted by ``(round(y, 2), round(x, 2))`` and
+    ``ideal_grid_positions`` is built in that same order).  If either ordering
+    changes, the initial alignment is wrong and the Hungarian match below can
+    lock in a bad permutation -- sort both lists the same way first.
+    """
     ideal_centers = np.array(ideal_centers_list)
     eval_centers = np.array(core_centers)
-    
+
+    if ideal_centers.shape != eval_centers.shape:
+        raise ValueError(
+            f"core_centers {eval_centers.shape} and ideal_centers "
+            f"{ideal_centers.shape} must match: an identity correspondence is "
+            f"assumed for the Procrustes fit.")
+
     ideal_centered = ideal_centers - np.mean(ideal_centers, axis=0)
     eval_centered = eval_centers - np.mean(eval_centers, axis=0)
     

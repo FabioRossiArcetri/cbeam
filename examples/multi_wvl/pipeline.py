@@ -52,7 +52,7 @@ def _force_release_memory() -> None:
 class WavelengthEngine:
     """One fully-built single-wavelength propagation pipeline."""
     wavelength_nm: float
-    p: dict
+    p_lambda: dict
     prop12: ChainPropagator
     pipeline: BatchPropagationPipeline
 

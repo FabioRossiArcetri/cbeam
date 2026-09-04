@@ -9,6 +9,10 @@ from scipy.interpolate import griddata
 from scipy.ndimage import uniform_filter, map_coordinates
 
 from .constants import N_SIGNALS, DEFAULT_GRID_RESOLUTION
+from .analysis import (
+    calibrate_subpixel_centers, collect_subpixel_signals,
+    map_evaluated_to_ideal_geometry,
+)
 
 
 def diagnose_input_psf(pipeline):
@@ -233,8 +237,8 @@ def diagnose_input_psf(pipeline):
 
 
 
-def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
-                           peak_box_size=5, show_arrow=True):
+def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, max_fields=1,
+                           peak_box_size=5, show_arrow=True, *, maxv=None):
     """
     Visualise a batch of output intensity maps with peak detection and annotation.
 
@@ -246,14 +250,18 @@ def visualize_batch_output(uf_2d_batch, X_plot, Y_plot, titles=None, maxv=1,
         Meshgrid arrays of spatial coordinates (μm).
     titles : list of str, optional
         Titles for each field.
-    maxv : int
+    max_fields : int
         Maximum number of fields to plot.
     peak_box_size : int (odd)
         Size of the square (in pixels) used for averaging around the peak.
     show_arrow : bool
         If True, draw a cyan arrow from the top‑right corner pointing to the peak.
+    maxv : int, optional
+        Deprecated alias for ``max_fields`` (the old name read like a value cap).
     """
-    n_fields = min(uf_2d_batch.shape[0], maxv)
+    if maxv is not None:
+        max_fields = maxv
+    n_fields = min(uf_2d_batch.shape[0], max_fields)
     n_cols = min(3, n_fields)
     n_rows = (n_fields + n_cols - 1) // n_cols
 
@@ -403,14 +411,16 @@ def visualize_batch_hex_grid_signals(
     pipeline,
     E_output_batch,
     ideal_grid_positions,
-    calibrate_subpixel_centers,
-    collect_subpixel_signals,
-    map_evaluated_to_ideal_geometry,
-    display_hex_grid_plots,
     titles=None,
     grid_resolution=DEFAULT_GRID_RESOLUTION,
 ):
-    """Execute centroid sub-pixel tracking and display hex grid configurations."""
+    """Execute centroid sub-pixel tracking and display hex grid configurations.
+
+    Uses the analysis helpers (calibrate_subpixel_centers,
+    collect_subpixel_signals, map_evaluated_to_ideal_geometry) and the local
+    display_hex_grid_plots directly -- they used to be passed in as arguments,
+    but every caller passed the same four package functions.
+    """
     mesh_final            = pipeline.wvg_props_output['mesh']
     waveguide_modes_final = pipeline.wvg_props_output['modes']
 
