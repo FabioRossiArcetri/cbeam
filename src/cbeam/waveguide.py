@@ -109,7 +109,7 @@ def get_19port_positions(core_spacing):
     # (jw-lin/cbeam); do not replace it with hex_ring_positions(), whose
     # angle-sorted order gives a physically identical device but a different
     # discretisation and hence different compute_neffs() output.
-    pos = [[0, 0]]
+    pos= [[0,0]]
 
     for i in range(6):
         xpos = core_spacing*np.cos(i*np.pi/3)
@@ -130,15 +130,15 @@ def get_19port_positions(core_spacing):
 
 
 # ------------------- Plotting/mesh loading functions ------------------- #
-def plot_mesh(mesh, IOR_dict=None, alpha=0.3, ax=None, plot_points=True, verbose=True):
+def plot_mesh(mesh,IOR_dict=None,alpha=0.3,ax=None,plot_points=True,verbose=True):
     """ plot a mesh and associated refractive index distribution
     Args:
     mesh: the mesh to be plotted. if None, we auto-compute a mesh using default values
     IOR_dict: dictionary that assigns each named region in the mesh to a refractive index value
     """
     import matplotlib.pyplot as plt
-    show = False
-    verts = 3
+    show=False
+    verts=3
     if ax is None:
         fig,ax = plt.subplots(figsize=(5,5))
         show=True
@@ -164,8 +164,8 @@ def plot_mesh(mesh, IOR_dict=None, alpha=0.3, ax=None, plot_points=True, verbose
 
         _els = els[tuple(mesh.cell_sets[material])][0,:,0,:]
         for _el in _els:
-            t = plt.Polygon(points[_el[:verts]][:,:2], facecolor=color)
-            t_edge = plt.Polygon(points[_el[:verts]][:,:2], lw=0.5, color='0.5', alpha=alpha, fill=False)
+            t=plt.Polygon(points[_el[:verts]][:,:2], facecolor=color)
+            t_edge=plt.Polygon(points[_el[:verts]][:,:2], lw=0.5,color='0.5',alpha=alpha,fill=False)
             ax.add_patch(t)
             ax.add_patch(t_edge)
 
@@ -203,9 +203,9 @@ def load_meshio_mesh(meshname):
                     _dict[key] = xp.concatenate([_dict[key], xp.arange(totaltris, totaltris+Ntris)])
                 else:
                     _dict[key] = xp.arange(totaltris, totaltris+Ntris)
-    for key, val in _dict.items():
-        _dict[key] = [None, val, None]
-    mesh.cell_sets = _dict
+    for key,val in _dict.items():
+        _dict[key] = [None,val,None]
+    mesh.cell_sets=_dict
     mesh.cells[1].data = cells1data
     for i in range(len(mesh.cells)):
         if i == 1:
@@ -213,7 +213,7 @@ def load_meshio_mesh(meshname):
         mesh.cells[i]=None
     return mesh
 
-def boolean_fragment(geom:pygmsh.occ.Geometry, _object, tool):
+def boolean_fragment(geom:pygmsh.occ.Geometry,_object,tool):
     """Fragment the tool and the object, and return the fragments in the following order:
     intersection, object_fragment, tool_fragment.
     In some cases one of the later two may be empty.
@@ -221,7 +221,7 @@ def boolean_fragment(geom:pygmsh.occ.Geometry, _object, tool):
     object_copy = geom.copy(_object)
     tool_copy = geom.copy(tool)
     try:
-        intersection = geom.boolean_intersection([object_copy, tool_copy])
+        intersection = geom.boolean_intersection([object_copy,tool_copy])
     except Exception:
         # no intersection - make first element None to signal
         return [None,_object,tool]
@@ -235,11 +235,11 @@ def linear_taper(final_scale,z_ex):
         return (final_scale - 1)/z_ex * z + 1
     return _inner_
 
-def blend(z, zc, a):
+def blend(z,zc,a):
     """Function of z that continuously varies from 0 to 1, used to blend functions together."""
     return 0.5 + 0.5 * xp.tanh((z - zc) / (0.25 * a)) # the 0.25 is kinda empirical lol
 
-def dist(p1, p2, axis=None):
+def dist(p1,p2,axis=None):
     if axis is not None:
         return xp.sqrt(xp.sum(xp.power(p1 - p2, 2), axis=axis))
     return xp.sqrt(xp.sum(xp.power(p1 - p2, 2)))
@@ -250,7 +250,7 @@ def dist(p1, p2, axis=None):
         return xp.sqrt(xp.sum(xp.power(p1 - p2, 2), axis=axis))
     return xp.sqrt(xp.sum(xp.power(p1 - p2, 2)))
 
-def rotate(v, theta):
+def rotate(v,theta):
     if v.ndim == 2:
         return xp.array([xp.cos(theta)*v[:,0] - xp.sin(theta)*v[:,1],
                          xp.sin(theta)*v[:,0] + xp.cos(theta)*v[:,1]]).T
@@ -267,14 +267,14 @@ class Prim2D:
     """ a Prim2D (2D primitive) is an an array of N (x,y) points, shape (N,2), that denote a closed curve (so, a polygon). 
         inside the closed curve, the primitive has refractive index n. 
     """
-    def __init__(self, n, points=[]):
+    def __init__(self,n,points=[]):
         self.points = xp.array(points)
         self.n = n
         self.res = len(points)
         self.mesh_size = None   # set to a number to force triangle size in region
         self.skip_refinement = False
-
-    def make_poly(self, geom):
+    
+    def make_poly(self,geom):
         # gmsh/pygmsh is host-only: always hand it plain numpy, never a JAX array.
         # Depth check via ndim (a JAX 0-d Array exposes __len__, so the old
         # ``hasattr(self.points[0][0], '__len__')`` test wrongly fired on the
@@ -310,7 +310,7 @@ class Prim2D:
             m = geom.generate_mesh(2,2,6)
         plot_mesh(m)            
 
-    def boundary_dist(self, x, y):
+    def boundary_dist(self,x,y):
         # User override for specific primitives
         """ this function computes the distance between the point (x,y) and the boundary of the primitive. 
         negative distances -> inside the boundary, while positive -> outside. note that this doesn't need to be exact, 
@@ -326,7 +326,7 @@ class Prim2D:
         raise NotImplementedError("Primitive boundary_dist must be implemented in subclasses.")
 
 
-    def nearest_boundary_point(self, x, y):
+    def nearest_boundary_point(self,x,y):
         # User override for specific primitives
         """ this function computes the point on the boundary that is closest to a point (x,y). 
         it is better if it works on vectorized inputs for x,y.
@@ -347,28 +347,28 @@ class Circle(Prim2D):
         the desired refractive index n, then use make_points() to generate
         the point array.
     """
-    def make_points(self, radius, res, center=(0,0)):
+    def make_points(self,radius,res,center=(0,0)):
         thetas = xp.linspace(0, 2*xp.pi, res, endpoint=False)
         points = [ (radius*xp.cos(t)+center[0], radius*xp.sin(t)+center[1]) for t in thetas ]
         points = xp.array(points)
         self.radius = radius
         self.center = center
         return points
-
+    
     def boundary_dist(self, x, y):
         return xp.sqrt(xp.power(x-self.center[0],2)+xp.power(y-self.center[1],2)) - self.radius
-
+    
     def nearest_boundary_point(self, x, y):
         t = xp.arctan2(y-self.center[1], x-self.center[0])
         bx = self.radius*xp.cos(t)
         by = self.radius*xp.sin(t)
-        return bx+self.center[0], by+self.center[1]
+        return bx+self.center[0],by+self.center[1]
 
 class Rectangle(Prim2D):
     """ rectangle primitive, defined by corner points. initialize using only 
         the desired refractive index n, then use make_points() to generate
         the point array. """
-    def make_points(self, xmin, xmax, ymin, ymax):
+    def make_points(self,xmin,xmax,ymin,ymax):
         points = xp.array([[xmin,ymin],[xmax,ymin],[xmax,ymax],[xmin,ymax]])
         self.bounds = [xmin,xmax,ymin,ymax]
         return points
@@ -439,9 +439,9 @@ class Rectangle(Prim2D):
         outy[cond11] = bounds[3]
 
         if outx.shape[0] == 1:
-            return outx[0], outy[0]
+            return outx[0],outy[0]
         return outx, outy
-
+    
 class Prim2DUnion(Prim2D):
     def __init__(self,p1:Prim2D,p2:Prim2D):
         """ initialize a boolean union of two primitives, p1 and p2. 
@@ -525,7 +525,7 @@ class Prim3D:
         """
         return self.prim2D.points
 
-    def transform_point_inside(self, x0, y0, z0, z):
+    def transform_point_inside(self,x0,y0,z0,z):
         # By default: no transform.
         """ for a point (x0,y0) inside the boundary at z0, compute a new point (x,y) at z, accounting
         for the z-variation of the Prim3D. should be implemented by inheriting classes, and 
@@ -566,7 +566,7 @@ class Pipe(Prim3D):
     """
     A Pipe is a 3D primitive with circular cross section at all z.
     """
-    def __init__(self, n, label, res, rfunc, cfunc=(0,0)):
+    def __init__(self,n,label,res,rfunc,cfunc=(0,0)):
         """
         ARGS:
             n: the refractive index inside the pipe
@@ -589,7 +589,7 @@ class Pipe(Prim3D):
     def transform_point_inside(self, x0, y0, z0, z):
         c = self.cfunc(z0)
         _c = self.cfunc(z)
-        rscale = self.rfunc(z) / self.rfunc(z0)
+        rscale = self.rfunc(z)/self.rfunc(z0)
         t = xp.arctan2(y0-c[1], x0-c[0])
         r = xp.sqrt(xp.power(x0-c[0],2) + xp.power(y0-c[1],2))
         return r*rscale*xp.cos(t) + _c[0], r*rscale*xp.sin(t) + _c[1]
@@ -598,7 +598,7 @@ class LinearPipe(Pipe):
     """
     A LinearPipe is a Pipe whose radius and centerpoint varies linearly.
     """
-    def __init__(self, n, label, res, r1, r2, z_ex, c1=(0,0), c2=(0,0)):
+    def __init__(self,n,label,res,r1,r2,z_ex,c1=(0,0),c2=(0,0)):
         """
         ARGS:
             n: the refractive index inside the pipe
@@ -629,7 +629,7 @@ class BoxPipe(Prim3D):
     """
     An box whose width, height, and center can scale with z.
     """
-    def __init__(self, n, label, xwfunc, ywfunc, cfunc=(0,0)):
+    def __init__(self,n,label,xwfunc,ywfunc,cfunc=(0,0)):
         """ 
         ARGS:
             n : refractive index
@@ -652,9 +652,9 @@ class BoxPipe(Prim3D):
     def transform_point_inside(self, x0, y0, z0, z):
         c = self.cfunc(z0)
         _c = self.cfunc(z)
-        xscale = self.xwfunc(z) / self.xwfunc(z0)
-        yscale = self.ywfunc(z) / self.ywfunc(z0)
-        return (x0-c[0])*xscale + _c[0], (y0-c[1])*yscale + _c[1]
+        xscale = self.xwfunc(z)/self.xwfunc(z0)
+        yscale = self.ywfunc(z)/self.ywfunc(z0)
+        return (x0-c[0])*xscale + _c[0] ,  (y0-c[1])*yscale + _c[1] 
 
 
 #------------------------- Waveguide core and practical subclasses --------------------------#
@@ -665,7 +665,7 @@ class Waveguide:
     """
     isect_skip_layers = [0]
     mesh_dist_scale = 0.5
-    mesh_dist_power = 1.0
+    mesh_dist_power = 1.0 
     min_mesh_size = 0.01
     max_mesh_size = 100.
     linear = False
@@ -687,9 +687,9 @@ class Waveguide:
         self.prim3Dgroups = prim3Dgroups
         self.IOR_dict = {}
         self.update(0)
-
+        
         primsflat = []
-        for i, p in enumerate(self.prim3Dgroups):
+        for i,p in enumerate(self.prim3Dgroups):
             if type(p) == list:    
                 for _p in p:
                     primsflat.append(_p.prim2D)
@@ -698,7 +698,7 @@ class Waveguide:
         self.primsflat = primsflat
 
         prim3Dsflat = []
-        for i, p in enumerate(self.prim3Dgroups):
+        for i,p in enumerate(self.prim3Dgroups):
             if type(p) == list:    
                 for _p in p:
                     prim3Dsflat.append(_p)
@@ -719,7 +719,7 @@ class Waveguide:
                     _p.update(z)
             else:
                 p.update(z)
-    def _make_mesh_dep(self, algo=6):
+    def _make_mesh_dep(self,algo=6):
         """
         Deprecated meshing function. Construct a finite element mesh for the Waveguide cross-section at the currently set 
         z coordinate, which in turn is set through self.update(z).
@@ -759,8 +759,8 @@ class Waveguide:
 
             mesh = geom.generate_mesh(dim=2,order=2,algorithm=algo)
             return mesh
-        
-    def _compute_mesh_size(self, x, y, _scale=1., _power=1., min_size=None, max_size=None):
+    
+    def _compute_mesh_size(self,x,y,_scale=1.,_power=1.,min_size=None,max_size=None):
         # Hot gmsh size callback: pure host scalar math.  Must stay on plain
         # numpy -- self.xp.zeros() under the JAX backend is immutable and the
         # ``dists[i] = ...`` writes below would raise.
@@ -775,7 +775,7 @@ class Waveguide:
         """
         prims = self.primsflat
         dists = np.zeros(len(prims))
-        for i, p in enumerate(prims):
+        for i,p in enumerate(prims): 
             if p.skip_refinement and p.mesh_size is not None:
                 dists[i] = 0.
             else:
@@ -789,8 +789,8 @@ class Waveguide:
             p1x, p1y = float(p.points[1, 0]), float(p.points[1, 1])
             boundary_mesh_size = min(ms, np.sqrt((p0x - p1x)**2 + (p0y - p1y)**2))
             scaled_size = np.power(1 + np.abs(d)/boundary_mesh_size * _scale, _power) * boundary_mesh_size
-            if d <= 0 and p.mesh_size is not None:
-                mesh_sizes[i] = min(scaled_size, p.mesh_size)
+            if d<=0 and p.mesh_size is not None:
+                mesh_sizes[i] = min(scaled_size,p.mesh_size)
             else:
                 mesh_sizes[i] = scaled_size
         target_size = np.min(mesh_sizes)
@@ -802,7 +802,7 @@ class Waveguide:
             # Kept identical for bit-for-bit realignment; with the default
             # max_mesh_size=100 the clamp never binds for the bundled examples
             # anyway (the cladding term caps target_size well below 100).
-            scaled_size = min(max_size, target_size)
+            scaled_size = min(max_size,target_size)    
         return target_size
     
     def make_mesh(self,writeto=None):
@@ -919,7 +919,7 @@ class Waveguide:
         plt.axis('equal')
         plt.show()
 
-    def _make_intersection_mesh(self, z, dz, writeto=None):
+    def _make_intersection_mesh(self,z,dz,writeto=None):
         """
         Not currently used. Construct a mesh around the union of Waveguide boundaries computed at z and z+dz.
         Returns both the mesh and a custom dictionary mapping regions of the mesh to refractive indices.
@@ -930,22 +930,22 @@ class Waveguide:
         min_mesh_size = self.min_mesh_size
         max_mesh_size = self.max_mesh_size
 
-        IOR_dict = {}
+        IOR_dict={}
 
         with pygmsh.occ.Geometry() as geom:
             gmsh.option.setNumber('General.Terminal', 0)
             self.update(z)
             elmnts = []
 
-            for i, gr in enumerate(self.prim3Dgroups):
+            for i,gr in enumerate(self.prim3Dgroups):
                 if type(gr) != list:
                     if i in self.isect_skip_layers:
                         elmnts.append([gr.prim2D.make_poly(geom)])
                     else:
                         poly = gr.prim2D.make_poly(geom)
-                        gr.update(z + dz)
+                        gr.update(z+dz)
                         next_poly = gr.prim2D.make_poly(geom)
-                        pieces = boolean_fragment(geom, poly, next_poly)
+                        pieces = boolean_fragment(geom,poly,next_poly)
                         elmnts.append([pieces])
                 else:
                     if i in self.isect_skip_layers:
@@ -954,17 +954,17 @@ class Waveguide:
                         all_pieces = []
                         for prim in gr:
                             poly = prim.prim2D.make_poly(geom)
-                            prim.update(z + dz)
+                            prim.update(z+dz)
                             next_poly = prim.prim2D.make_poly(geom)
-                            pieces = boolean_fragment(geom, poly, next_poly)
+                            pieces = boolean_fragment(geom,poly,next_poly)
                             all_pieces.append(pieces)
                     elmnts.append(all_pieces)
 
             # Boolean subtraction of layers
-            for i in range(len(elmnts) - 1):
+            for i in range(len(elmnts)-1):
                 group = elmnts[i]
-                _group = elmnts[i + 1]
-                for j, fragroup in enumerate(group):
+                _group = elmnts[i+1]
+                for j,fragroup in enumerate(group):
                     for _fragroup in _group:
                         idx = 0
                         _idx = 0
@@ -975,74 +975,74 @@ class Waveguide:
 
                         if isinstance(fragroup, list):
                             if isinstance(_fragroup, list):
-                                fragroup[idx:] = geom.boolean_difference(fragroup[idx:], _fragroup[_idx:], delete_first=True, delete_other=False)
+                                fragroup[idx:] = geom.boolean_difference(fragroup[idx:],_fragroup[_idx:],delete_first=True,delete_other=False)
                             else:
-                                fragroup[idx:] = geom.boolean_difference(fragroup[idx:], _fragroup, delete_first=True, delete_other=False)
+                                fragroup[idx:] = geom.boolean_difference(fragroup[idx:],_fragroup,delete_first=True,delete_other=False)
                         else:
                             if isinstance(_fragroup, list):
-                                fragroup = geom.boolean_difference(fragroup, _fragroup[_idx:], delete_first=True, delete_other=False)
+                                fragroup = geom.boolean_difference(fragroup,_fragroup[_idx:],delete_first=True,delete_other=False)
                             else:
-                                fragroup = geom.boolean_difference(fragroup, _fragroup, delete_first=True, delete_other=False)
+                                fragroup = geom.boolean_difference(fragroup,_fragroup,delete_first=True,delete_other=False)
 
             # Add labels
-            prim3Dgroups = []
+            prim3Dgroups =[]
             for gr in self.prim3Dgroups:
                 if isinstance(gr, list):
                     prim3Dgroups.append(gr)
                 else:
                     prim3Dgroups.append([gr])
 
-            for i, layer in enumerate(elmnts):
-                for j, sublayer in enumerate(layer):
+            for i,layer in enumerate(elmnts):
+                for j,sublayer in enumerate(layer):
                     if isinstance(sublayer, list):
                         # lists contain two or three fragments, formed by the union of the 3D primitives evaled at z and z + dz
-                        if len(sublayer) == 2:
-                            geom.add_physical(sublayer[0], prim3Dgroups[i][j].label + "2")
-                            IOR_dict[prim3Dgroups[i][j].label + "2"] = prim3Dgroups[i][j].prim2D.n
-                            geom.add_physical(sublayer[1], prim3Dgroups[i][j].label + "1")
+                        if len(sublayer)==2:
+                            geom.add_physical(sublayer[0],prim3Dgroups[i][j].label+"2")
+                            IOR_dict[prim3Dgroups[i][j].label+"2"] = prim3Dgroups[i][j].prim2D.n
+                            geom.add_physical(sublayer[1],prim3Dgroups[i][j].label+"1")
                             if isinstance(self.prim3Dgroups[i-1], list):
-                                IOR_dict[prim3Dgroups[i][j].label + "1"] = prim3Dgroups[i-1][j].prim2D.n
+                                IOR_dict[prim3Dgroups[i][j].label+"1"] = prim3Dgroups[i-1][j].prim2D.n
                             else:
-                                IOR_dict[prim3Dgroups[i][j].label + "1"] = prim3Dgroups[i-1][0].prim2D.n
+                                IOR_dict[prim3Dgroups[i][j].label+"1"] = prim3Dgroups[i-1][0].prim2D.n
 
-                        elif len(sublayer) == 3:
+                        elif len(sublayer)==3:
                             if sublayer[0] is not None:
-                                geom.add_physical(sublayer[0], self.prim3Dgroups[i][j].label + "2")
-                                IOR_dict[prim3Dgroups[i][j].label + "2"] = prim3Dgroups[i][j].prim2D.n
+                                geom.add_physical(sublayer[0],self.prim3Dgroups[i][j].label+"2")
+                                IOR_dict[prim3Dgroups[i][j].label+"2"] = prim3Dgroups[i][j].prim2D.n
 
-                            geom.add_physical(sublayer[1], self.prim3Dgroups[i][j].label + "0")
-                            IOR_dict[prim3Dgroups[i][j].label + "0"] = prim3Dgroups[i][j].prim2D.n
+                            geom.add_physical(sublayer[1],self.prim3Dgroups[i][j].label+"0")
+                            IOR_dict[prim3Dgroups[i][j].label+"0"] = prim3Dgroups[i][j].prim2D.n
 
-                            geom.add_physical(sublayer[2], self.prim3Dgroups[i][j].label + "1")
+                            geom.add_physical(sublayer[2],self.prim3Dgroups[i][j].label+"1")
                             if isinstance(self.prim3Dgroups[i-1], list):
-                                IOR_dict[prim3Dgroups[i][j].label + "1"] = prim3Dgroups[i-1][j].prim2D.n
+                                IOR_dict[prim3Dgroups[i][j].label+"1"] = prim3Dgroups[i-1][j].prim2D.n
                             else:
-                                IOR_dict[prim3Dgroups[i][j].label + "1"] = prim3Dgroups[i-1][0].prim2D.n
+                                IOR_dict[prim3Dgroups[i][j].label+"1"] = prim3Dgroups[i-1][0].prim2D.n
 
                         else:
                             raise Exception("wrong number of fragments produced by geom.boolean_fragments()")
                     else:
                         # if the sublayer is just a polygon, its structure is assumed to be fixed from z -> z + dz
                         if isinstance(self.prim3Dgroups[i], list):
-                            geom.add_physical(layer, self.prim3Dgroups[i].label)
+                            geom.add_physical(layer,self.prim3Dgroups[i].label)
                             IOR_dict[self.prim3Dgroups[i].label] = self.prim3Dgroups[i].prim2D.n
                         else:
-                            geom.add_physical(layer, self.prim3Dgroups[i].label)
+                            geom.add_physical(layer,self.prim3Dgroups[i].label)
                             IOR_dict[self.prim3Dgroups[i].label] = self.prim3Dgroups[i].prim2D.n
                         break
-
+                
             # Mesh refinement callback
-            def callback(dim, tag, x, y, z, lc):
-                return self._compute_mesh_size(x, y, _scale=_scale, _power=_power, min_size=min_mesh_size, max_size=max_mesh_size)
+            def callback(dim,tag,x,y,z,lc):
+                return self._compute_mesh_size(x,y,_scale=_scale,_power=_power,min_size=min_mesh_size,max_size=max_mesh_size)
 
             geom.env.removeAllDuplicates()
             geom.set_mesh_size_callback(callback)
 
-            mesh = geom.generate_mesh(dim=2, order=2, algorithm=6)
+            mesh = geom.generate_mesh(dim=2,order=2,algorithm=6)
             if writeto is not None:
-                gmsh.write(writeto + ".msh")
+                gmsh.write(writeto+".msh")
                 gmsh.clear()
-            return mesh, IOR_dict
+            return mesh,IOR_dict
 
     def assign_IOR(self):
         """Build a dictionary mapping material labels in the Waveguide mesh 
@@ -1059,7 +1059,7 @@ class Waveguide:
                 self.IOR_dict[p.label] = p.prim2D.n  
         return self.IOR_dict
 
-    def plot_mesh(self, z=None, mesh=None, IOR_dict=None, alpha=0.1, ax=None, plot_points=True, verbose=True):
+    def plot_mesh(self,z=None,mesh=None,IOR_dict=None,alpha=0.1,ax=None,plot_points=True,verbose=True):
         """ plot a mesh and associated refractive index distribution
         
         ARGS:
@@ -1103,38 +1103,38 @@ class Waveguide:
         plt.ylabel(r"$y$")
         plt.axis('equal')
         plt.show()
-        
-    def transform_unvec(self, x0, y0, z0, z):
+    
+    def transform_unvec(self,x0,y0,z0,z):
         """Unvectorized version of transform(); present for reference."""
         if self.z_invariant:
-            return x0, y0
+            return x0,y0
 
         pt = xp.array([x0, y0])
         self.update(z0)
         preserved_prim3Ds = [p for p in self.prim3Dsflat if p.preserve_shape]
         eps = 1e-12
-
+        
         for p in preserved_prim3Ds:
-            if p.prim2D.boundary_dist(x0, y0) <= eps:
-                return p.transform_point_inside(x0, y0, z0, z)
+            if p.prim2D.boundary_dist(x0,y0)<=eps:
+                return p.transform_point_inside(x0,y0,z0,z)
 
         boundary_points = xp.zeros((len(preserved_prim3Ds), 2))
         next_boundary_points = xp.zeros_like(boundary_points)
 
-        for i, p in enumerate(preserved_prim3Ds):
-            bp = p.prim2D.nearest_boundary_point(x0, y0)
-            boundary_points[i, :] = bp
-            next_boundary_points[i, :] = p.transform_point_inside(bp[0], bp[1], z0, z)
+        for i,p in enumerate(preserved_prim3Ds):
+            bp = p.prim2D.nearest_boundary_point(x0,y0)
+            boundary_points[i,:] = bp
+            next_boundary_points[i,:] = p.transform_point_inside(bp[0],bp[1],z0,z)
 
         prim_pairs = list(combinations(xp.arange(len(preserved_prim3Ds)), 2))
-        avg_dists = [0.5 * (dist(boundary_points[i], pt) + dist(boundary_points[j], pt)) for (i, j) in prim_pairs]
+        avg_dists = [ 0.5*(dist(boundary_points[i],pt)+dist(boundary_points[j],pt)) for (i,j) in prim_pairs]
         idx_min_dist = xp.argmin(avg_dists)
-        i, j = prim_pairs[idx_min_dist]
+        i,j = prim_pairs[idx_min_dist]
 
-        bp_sep = dist(boundary_points[i], boundary_points[j])
-        next_bp_sep = dist(next_boundary_points[i], next_boundary_points[j])
-        _scale = next_bp_sep / bp_sep
-
+        bp_sep = dist(boundary_points[i],boundary_points[j])
+        next_bp_sep = dist(next_boundary_points[i],next_boundary_points[j])
+        _scale = next_bp_sep/bp_sep
+        
         edge_vec1 = pt - boundary_points[i]
         edge_vec2 = pt - boundary_points[j]
 
@@ -1143,15 +1143,15 @@ class Waveguide:
 
         angl = xp.arctan2(boundary_edge[1], boundary_edge[0])
         next_angl = xp.arctan2(next_boundary_edge[1], next_boundary_edge[0])
-        rot = next_angl - angl
+        rot = next_angl-angl
 
         np1 = rotate(edge_vec1*_scale,rot) + next_boundary_points[i]
         np2 = rotate(edge_vec2*_scale,rot) + next_boundary_points[j]
 
         new_point = np1 if dist(pt, boundary_points[i]) <= dist(pt, boundary_points[j]) else np2
-        return new_point[0], new_point[1]
-        
-    def transform(self, x0, y0, z0, z):
+        return new_point[0],new_point[1]
+    
+    def transform(self,x0,y0,z0,z):
         """ spatial transformation that should work with most meshes. kinda slow to compute currently, maybe could be sped up.
         general idea: for a point (x0,y0) find the two nearest primitives at z0. this point, plus the two closest points to 
         to it, each constrained to lie on a primitive boundary, define a triangle. At z, the primitive boundaries move, and so 
@@ -1185,13 +1185,13 @@ class Waveguide:
         boundary_points = xp.zeros((len(x0), len(preserved_prim3Ds), 2))
         next_boundary_points = xp.zeros_like(boundary_points)
 
-        for i, p in enumerate(preserved_prim3Ds):
-            bps = p.prim2D.nearest_boundary_point(x0, y0)
-            boundary_points[:, i, 0] = bps[0]
-            boundary_points[:, i, 1] = bps[1]
+        for i,p in enumerate(preserved_prim3Ds):
+            bps = p.prim2D.nearest_boundary_point(x0,y0)
+            boundary_points[:,i,0] = bps[0]
+            boundary_points[:,i,1] = bps[1]
             nbps = xp.array(p.transform_point_inside(bps[0], bps[1], z0, z)).T
-            next_boundary_points[:, i, 0] = nbps[:, 0]
-            next_boundary_points[:, i, 1] = nbps[:, 1]
+            next_boundary_points[:,i,0] = nbps[:,0]
+            next_boundary_points[:,i,1] = nbps[:,1]
 
         prim_pairs = xp.array(list(combinations(xp.arange(len(preserved_prim3Ds)), 2)))
         avg_dists = xp.array([0.5 * (dist(boundary_points[:, i], pt, axis=1) + dist(boundary_points[:, j], pt, axis=1)) for (i, j) in prim_pairs])
@@ -1199,15 +1199,15 @@ class Waveguide:
         ijs = xp.array(prim_pairs[idx_min_dist])
 
         idxrange = xp.arange(x0.shape[0])
-        bps0 = boundary_points[idxrange, ijs[:, 0]]
-        bps1 = boundary_points[idxrange, ijs[:, 1]]
+        bps0 = boundary_points[idxrange,ijs[:,0]]
+        bps1 = boundary_points[idxrange,ijs[:,1]]
 
-        nbps0 = next_boundary_points[idxrange, ijs[:, 0]]
-        nbps1 = next_boundary_points[idxrange, ijs[:, 1]]
+        nbps0 = next_boundary_points[idxrange,ijs[:,0]]
+        nbps1 = next_boundary_points[idxrange,ijs[:,1]]
 
-        bp_sep = dist(bps0, bps1, axis=1)
-        next_bp_sep = dist(nbps0, nbps1, axis=1)
-        _scale = next_bp_sep / bp_sep
+        bp_sep = dist(bps0,bps1,axis=1)
+        next_bp_sep = dist(nbps0,nbps1,axis=1)
+        _scale = next_bp_sep/bp_sep
 
         edge_vec1 = pt - bps0
         edge_vec2 = pt - bps1
@@ -1216,11 +1216,11 @@ class Waveguide:
 
         angl = xp.arctan2(boundary_edge[:, 1], boundary_edge[:, 0])
         next_angl = xp.arctan2(next_boundary_edge[:, 1], next_boundary_edge[:, 0])
-        rot = next_angl - angl
-        np1 = rotate(edge_vec1 * _scale[:, None], rot) + nbps0
-        np2 = rotate(edge_vec2 * _scale[:, None], rot) + nbps1
-        npsx, npsy = (0.5 * (np1 + np2)).T
-        eps = 1e-12
+        rot = next_angl-angl
+        np1 = rotate(edge_vec1*_scale[:,None],rot) + nbps0
+        np2 = rotate(edge_vec2*_scale[:,None],rot) + nbps1
+        npsx,npsy = (0.5*(np1+np2)).T
+        eps=1e-12
 
         # check inside masked regions
         for p in preserved_prim3Ds:
@@ -1249,19 +1249,19 @@ class Waveguide:
         if self.z_invariant:
             return xp.zeros_like(x0), xp.zeros_like(y0)
         if self.vectorized_transform:
-            x1, y1 = self.transform(x0, y0, z0, z - self.fd_eps)
-            x2, y2 = self.transform(x0, y0, z0, z + self.fd_eps)
-            return 0.5 * (x2 - x1) / self.fd_eps, 0.5 * (y2 - y1) / self.fd_eps
+            x1,y1 = self.transform(x0,y0,z0,z-self.fd_eps)
+            x2,y2 = self.transform(x0,y0,z0,z+self.fd_eps)
+            return 0.5*(x2-x1)/self.fd_eps , 0.5*(y2-y1)/self.fd_eps
         else:
             dx, dy = xp.zeros_like(x0), xp.zeros_like(y0)
             for i in range(dx.shape[0]):
-                x1, y1 = self.transform(x0[i], y0[i], z0, z - self.fd_eps)
-                x2, y2 = self.transform(x0[i], y0[i], z0, z + self.fd_eps)
-                dx[i] = 0.5 * (x2 - x1) / self.fd_eps
-                dy[i] = 0.5 * (y2 - y1) / self.fd_eps
-            return dx, dy
+                x1,y1 = self.transform(x0[i],y0[i],z0,z-self.fd_eps)
+                x2,y2 = self.transform(x0[i],y0[i],z0,z+self.fd_eps)
+                dx[i] = 0.5*(x2-x1)/self.fd_eps
+                dy[i] = 0.5*(y2-y1)/self.fd_eps
+            return dx,dy
 
-    def transform_mesh(self, mesh0, z0, z, mesh=None):
+    def transform_mesh(self,mesh0,z0,z,mesh=None):
         """ use the transformation law to create a new, transformed 
         mesh from the reference mesh.
         
@@ -1351,8 +1351,8 @@ class CircularStepIndexFiber(Waveguide):
             core_res: how many line segments to divide the core boundary into, default 16
             clad_res: how many line segments to divide the cladding boundary into, default 32
         """
-        core = Pipe(ncore, "core", core_res, rcore, (0,0))
-        clad = Pipe(nclad, "clad", clad_res, rclad, (0,0))
+        core = Pipe(ncore,"core",core_res,rcore,(0,0))
+        clad = Pipe(nclad,"clad",clad_res,rclad,(0,0))
         core.mesh_size = 2*xp.pi*rcore/core_res
         clad.skip_refinement = True
         els = [clad,core]        
@@ -1427,8 +1427,8 @@ class PhotonicLantern(Waveguide):
         def cfunc(c):
             return lambda z: (taper_func(z)*c[0], taper_func(z)*c[1])
 
-        for k, (c, r, n) in enumerate(zip(core_pos, rcores, ncores)):
-            cores.append(Pipe(n, "core"+str(k), core_res, rfunc(r), cfunc(c)))
+        for k,(c,r,n) in enumerate(zip(core_pos,rcores,ncores)):
+            cores.append(Pipe(n,"core"+str(k),core_res,rfunc(r),cfunc(c)))
             cores[k].mesh_size = core_mesh_size
 
         cladrfunc = lambda z: taper_func(z)*rclad
@@ -1445,16 +1445,16 @@ class PhotonicLantern(Waveguide):
         
         super().__init__(els)
         self.z_ex = z_ex
-        self.min_mesh_size = min(self.min_mesh_size, core_mesh_size, clad_mesh_size)
+        self.min_mesh_size = min(self.min_mesh_size,core_mesh_size,clad_mesh_size)
 
-    def transform(self, x0, y0, z0, z):
-        scale = self.taper_func(z) / self.taper_func(z0)
-        return x0 * scale, y0 * scale
+    def transform(self,x0,y0,z0,z):
+        scale =  self.taper_func(z)/self.taper_func(z0)
+        return x0  * scale , y0  * scale
 
-    def deriv_transform(self, x0, y0, z0, z):
-        return x0*(self.taper_factor-1)/self.z_ex, y0*(self.taper_factor-1)/self.z_ex
+    def deriv_transform(self,x0,y0,z0,z):
+        return x0*(self.taper_factor-1)/self.z_ex , y0*(self.taper_factor-1)/self.z_ex
 
-    def isolate_isect(self, k, d):
+    def isolate_isect(self,k,d):
         IOR_dict = copy.copy(d)
         for i in range(len(self.prim3Dgroups[-1])):
             if i != k:
@@ -1483,7 +1483,7 @@ class TestPhotonicLantern(PhotonicLantern):
         core_mesh_size = 0.1
         rcores = [rcore] * 6
         ncores = [ncore] * 6
-        super().__init__(core_pos, rcores, rclad, rjack, ncores, nclad, njack, z_ex, taper_factor, core_res, clad_res, jack_res, core_mesh_size, clad_mesh_size)
+        super().__init__(core_pos,rcores,rclad,rjack,ncores,nclad,njack,z_ex,taper_factor,core_res,clad_res,jack_res,core_mesh_size,clad_mesh_size)
 
 # ---------------------- Dicoupler, Tricoupler, PlanarTricoupler, OAMLantern ----------------------
 
@@ -1512,16 +1512,16 @@ class Dicoupler(Waveguide):
 
         def c2func(z):
             if z <= z_ex/2:
-                b = blend(z, z_ex/4-a/2, a)
+                b = blend(z,z_ex/4-a/2,a)
                 return xp.array([dmin/2,0])*b + xp.array([dmax/2,0])*(1-b)
             else:
-                b = blend(z, 3*z_ex/4+a/2, a)
+                b = blend(z,3*z_ex/4+a/2,a)
                 return xp.array([dmax/2,0])*b + xp.array([dmin/2,0])*(1-b)
 
         def c1func(z): return -c2func(z)
 
         def dfunc(z): return c2func(z)[0]-c1func(z)[0]  # inter core spacing function
-
+        
         self.c1func = c1func
         self.c2func = c2func
         self.dfunc = dfunc
@@ -1559,15 +1559,15 @@ class Dicoupler(Waveguide):
         )
         x2 = xp.where(x1 <= c1_0[0] + self.rcore1 + self.eps, x1 - dd, x1)
         x3 = xp.where(x2 >= c2_0[0] - self.rcore2 - self.eps, x2 + dd, x2)
-        return x3, y0
+        return x3,y0
 
     def plot_paths(self):
         """Plot the single-mode channel paths."""
         zs = xp.linspace(0, self.z_ex, 400)
         c1s = [self.c1func(float(z))[0] for z in zs]
         c2s = [self.c2func(float(z))[0] for z in zs]
-        plt.plot(zs, c1s, label="channel 1")
-        plt.plot(zs, c2s, label="channel 2")
+        plt.plot(zs,c1s,label="channel 1")
+        plt.plot(zs,c2s,label="channel 2")
         plt.xlabel(r"$z$")
         plt.ylabel(r"$x$")
         plt.legend(loc='best',frameon=False)
@@ -1595,16 +1595,16 @@ class Tricoupler(Waveguide):
 
         def c1func(z):
             if z <= z_ex/2:
-                b = blend(z, z_ex/4-a/2, a)
+                b = blend(z,z_ex/4-a/2,a)
                 return xp.array([dmin/2,0])*b + xp.array([dmax/2,0])*(1-b)
             else:
-                b = blend(z, 3*z_ex/4+a/2, a)
+                b = blend(z,3*z_ex/4+a/2,a)
                 return xp.array([dmax/2,0])*b + xp.array([dmin/2,0])*(1-b)
 
         def c2func(z):
             c = c1func(z)
             return c[0]*xp.cos(2*xp.pi/3), c[0]*xp.sin(2*xp.pi/3)            
-
+        
         def c3func(z):
             c = c1func(z)
             return c[0]*xp.cos(4*xp.pi/3), c[0]*xp.sin(4*xp.pi/3)
@@ -1626,7 +1626,7 @@ class Tricoupler(Waveguide):
         core2.mesh_size = core_mesh_size
         core2.preserve_shape = True
 
-        core3 = Pipe(ncore, "core3", core_res, lambda z: rcore, c3func)
+        core3 = Pipe(ncore,"core3",core_res,lambda z: rcore,c3func)
         core3.mesh_size = core_mesh_size
         core3.preserve_shape = True
 
@@ -1651,7 +1651,7 @@ class Tricoupler(Waveguide):
         c2s_np = xp.asarray(c2s)
         c3s_np = xp.asarray(c3s)
 
-        fig, axs = plt.subplots(2, 1, sharex=True)
+        fig,axs = plt.subplots(2,1,sharex=True)
         axs[0].plot(zs_np, c1s_np[:, 0], label="channel 1")
         axs[0].plot(zs_np, c2s_np[:, 0], label="channel 2")
         axs[0].plot(zs_np, c3s_np[:, 0], label="channel 3")
@@ -1664,12 +1664,12 @@ class Tricoupler(Waveguide):
         axs[1].set_ylabel(r"$y$")
         axs[1].set_xlabel(r"$z$")
         axs[0].legend(loc="best", frameon=False)
-        plt.subplots_adjust(hspace=0, wspace=0)
+        plt.subplots_adjust(hspace=0,wspace=0)
         plt.show()
 class PlanarTricoupler(Tricoupler):
     ''' Tricoupler with 2D channel paths '''
     recon_midpts = True
-    linear = False
+    linear=False
 
     def __init__(self, rcore_center, rcore_outer, ncore, dmax, dmin, nclad,
                  coupling_length, a, core_res, core_mesh_size, clad_mesh_size):
@@ -1691,10 +1691,10 @@ class PlanarTricoupler(Tricoupler):
         z_ex = coupling_length * 2
         def c1func(z):
             if z <= z_ex/2:
-                b = blend(z, z_ex/4-a/2, a)
+                b = blend(z,z_ex/4-a/2,a)
                 return xp.array([dmin/2,0])*b + xp.array([dmax/2,0])*(1-b)
             else:
-                b = blend(z, 3*z_ex/4+a/2, a)
+                b = blend(z,3*z_ex/4+a/2,a)
                 return xp.array([dmax/2,0])*b + xp.array([dmin/2,0])*(1-b)
         def c2func(z):
             c = c1func(z)
@@ -1720,7 +1720,7 @@ class PlanarTricoupler(Tricoupler):
         core2.mesh_size = core_mesh_size
         core2.preserve_shape = True
 
-        core3 = Pipe(ncore, "core3", core_res, lambda z: rcore_center, c3func)
+        core3 = Pipe(ncore,"core3",core_res,lambda z: rcore_center,c3func)
         core3.mesh_size = core_mesh_size
         core3.preserve_shape = True
 
@@ -1730,7 +1730,7 @@ class PlanarTricoupler(Tricoupler):
 
         Waveguide.__init__(self,els)
         self.z_ex = z_ex
-
+    
 class OAMPhotonicLantern(PhotonicLantern):
     ''' OAM photonic lantern using ring core '''
     vectorized_transform = True
@@ -1768,8 +1768,8 @@ class OAMPhotonicLantern(PhotonicLantern):
         def rfunc(r): return lambda z: taper_func(z) * r
         def cfunc(c): return lambda z: (taper_func(z)*c[0], taper_func(z)*c[1])
 
-        for k, (c, r, n) in enumerate(zip(core_pos, rcores, ncores)):
-            cores.append(Pipe(n, "core"+str(k), core_res, rfunc(r), cfunc(c)))
+        for k,(c,r,n) in enumerate(zip(core_pos,rcores,ncores)):
+            cores.append(Pipe(n,"core"+str(k),core_res,rfunc(r),cfunc(c)))
             cores[k].mesh_size = core_mesh_size
 
         cladrfunc_outer = lambda z: taper_func(z)*(ring_radius+ring_width/2)

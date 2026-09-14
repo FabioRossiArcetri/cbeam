@@ -1,6 +1,6 @@
 from juliacall import Main as jl
 from .backend import get_xp
-import os, cbeam
+import os,cbeam
 import numpy as _np
 
 from juliacall import Main as jl
@@ -121,10 +121,10 @@ def evaluate_grid(pointsx,pointsy,field,tree):
     pointsx = _host(pointsx, dtype=_np.float64)
     pointsy = _host(pointsy, dtype=_np.float64)
     field   = _host(field)                     # float64 or complex128
-    return jl.FEval.evaluate(pointsx, pointsy, field, tree)
+    return jl.FEval.evaluate(pointsx,pointsy,field,tree)
 
-def update_tree(tree, rescale_factor):
-    jl.FEval.update_tritree(tree, rescale_factor)
+def update_tree(tree,rescale_factor):
+    jl.FEval.update_tritree(tree,rescale_factor)
 
 def evaluate_func(field,tree):
     """ return a (julia) function of the point [x,y] corresponding to a given FE field """
