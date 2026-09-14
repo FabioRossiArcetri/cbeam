@@ -132,6 +132,11 @@ def get_19port_positions(core_spacing):
 
 # ------------------- Plotting/mesh loading functions ------------------- #
 def plot_mesh(mesh, IOR_dict=None, alpha=0.3, ax=None, plot_points=True, verbose=True):
+    """ plot a mesh and associated refractive index distribution
+    Args:
+    mesh: the mesh to be plotted. if None, we auto-compute a mesh using default values
+    IOR_dict: dictionary that assigns each named region in the mesh to a refractive index value
+    """
     import matplotlib.pyplot as plt
     show = False
     verts = 3
@@ -253,12 +258,13 @@ def rotate(v, theta):
                          xp.sin(theta)*v[0] + xp.cos(theta)*v[1]])
 
 def blend(z, zc, a):
+    """ this is a function of z that continuously varies from 0 to 1, used to blend functions together. """
     return 0.5 + 0.5 * xp.tanh((z - zc) / (0.25 * a))
 
 #-------------------- Geometric Primitives: Prim2D, Circle, Rectangle, Union ----------------------#
 class Prim2D:
-    """
-    a Prim2D (2D primitive) is an array of N (x,y) points, shape (N,2), that denote a closed curve (polygon).
+    """ a Prim2D (2D primitive) is an an array of N (x,y) points, shape (N,2), that denote a closed curve (so, a polygon). 
+        inside the closed curve, the primitive has refractive index n. 
     """
     def __init__(self, n, points=[]):
         self.points = xp.array(points)
@@ -281,14 +287,22 @@ class Prim2D:
         return poly
 
     def update(self, points):
+        """ update the primitive according to some args and return an Nx2 array of points.
+            the default behavior is to manually pass in a points array. more specific primitives
+            inheriting from Prim2D should implement their own update().
+        """
         self.points = xp.array(points)
         self.res = len(self.points)
         return self.points
 
     def make_points(self):
+        """ make an Nx2 array of points for marking the primitive boundary,
+            according to some args.
+        """
         return self.points
 
     def plot_mesh(self):
+        """ a quick check to see what this object looks like. generates a mesh with default parameters. """
         with pygmsh.occ.Geometry() as geom:
             poly = self.make_poly(geom)
             geom.add_physical(poly, "poly")
@@ -297,16 +311,40 @@ class Prim2D:
 
     def boundary_dist(self, x, y):
         # User override for specific primitives
+        """ this function computes the distance between the point (x,y) and the boundary of the primitive. 
+        negative distances -> inside the boundary, while positive -> outside. note that this doesn't need to be exact, 
+        the "distance" just needs to be positive outside the boundary, negative inside the boundary, and go to 0 as you approach the boundary.
+        it is better if it works on vectorized inputs for x,y.
+
+        ARGS:
+            x (float or vector): x coordinate(s)  of point(s) to measure distance w/ boundary.
+            y (float or vector): y coordinate(s)  of point(s) to measure distance w/ boundary.
+        RETURNS:
+            (float or vector): the distance(s) to the boundary from the point(s)
+        """
         raise NotImplementedError("Primitive boundary_dist must be implemented in subclasses.")
 
 
     def nearest_boundary_point(self, x, y):
         # User override for specific primitives
+        """ this function computes the point on the boundary that is closest to a point (x,y). 
+        it is better if it works on vectorized inputs for x,y.
+
+        ARGS:
+            x (float or vector): x coordinate(s)  of point(s) to measure distance w/ boundary.
+            y (float or vector): y coordinate(s)  of point(s) to measure distance w/ boundary.
+        RETURNS:
+            (tuple): a tuple containing:
+                - (float or vector): the x coordinate(s) of the nearest boundary point     
+                - (float or vector): the y coordinate(s) of the nearest boundary point        
+        """
         raise NotImplementedError("Primitive nearest_boundary_point must be implemented in subclasses.")
 
 class Circle(Prim2D):
-    """
-    A Circle primitive, defined by radius, center, and number of sides.
+    """ a Circle primitive, defined by radius, center, and number of sides
+        (so actually a regular polygon lol). initialize using only 
+        the desired refractive index n, then use make_points() to generate
+        the point array.
     """
     def make_points(self, radius, res, center=(0,0)):
         thetas = xp.linspace(0, 2*xp.pi, res, endpoint=False)
@@ -326,9 +364,9 @@ class Circle(Prim2D):
         return bx+self.center[0], by+self.center[1]
 
 class Rectangle(Prim2D):
-    """
-    Rectangle primitive, defined by 4 corners.
-    """
+    """ rectangle primitive, defined by corner points. initialize using only 
+        the desired refractive index n, then use make_points() to generate
+        the point array. """
     def make_points(self, xmin, xmax, ymin, ymax):
         points = xp.array([[xmin,ymin],[xmax,ymin],[xmax,ymax],[xmin,ymax]])
         self.bounds = [xmin,xmax,ymin,ymax]
@@ -405,12 +443,21 @@ class Rectangle(Prim2D):
 
 class Prim2DUnion(Prim2D):
     def __init__(self, p1:Prim2D, p2:Prim2D):
+        """ initialize a boolean union of two primitives, p1 and p2. 
+        not fully tested.
+        """
         assert p1.n == p2.n, "primitives must have the same refractive index"
         super().__init__(p1.n, xp.array([p1.points,p2.points]))
         self.p1 = p1
         self.p2 = p2
 
     def make_points(self, args1, args2):
+        """ make points corresponding to the boundary of the primitive. 
+
+        ARGS:
+            args1 (tuple): the arguments of make_points for the first primitive
+            args2 (tuple): the arguments of make_points for the second primitive
+        """
         points1 = self.p1.make_points(*args1)
         points2 = self.p2.make_points(*args2)
         points = xp.array([points1,points2])
@@ -426,12 +473,19 @@ class Prim2DUnion(Prim2D):
 
 #---------------------- 3D Primitives: Prim3D, Pipe, BoxPipe, Box etc. -------------------------#
 class Prim3D:
-    """
-    a Prim3D (3D primitive) is a function of z that returns a Prim2D.
+    """ a Prim3D (3D primitive) is a function of z that returns a Prim2D. 
+    it can be used to represent tapering pipes, boxes, etc.
     """
     preserve_shape = True
 
     def __init__(self, prim2D: Prim2D, label: str):
+        """ initialize a Prim3D object. this default behavior is often
+        overwritten by inheriting classes.
+
+        ARGS:
+            prim2D (Prim2D): a prim2D object (e.g. Circle, Rectangle).
+            label (str): a string label to attach to the 2D primitive.
+        """
         self.prim2D = prim2D
         self.label = label
         self._mesh_size = None
@@ -454,14 +508,38 @@ class Prim3D:
         self.prim2D.skip_refinement = val
 
     def update(self, z):
+        """ update self.prim2D to the desired z coordinate. """
         points = self.make_points_at_z(z)
         self.prim2D.update(points)
 
     def make_points_at_z(self, z):
+        """ make points of prim2D at given z coord. should be implemented by 
+        inheriting classes. 
+
+        ARGS:
+            z (float): the desired z coordinate 
+
+        RETURNS:
+            (array): an Nx2 array of points corresponding to the boundary at z.
+        """
         return self.prim2D.points
 
     def transform_point_inside(self, x0, y0, z0, z):
         # By default: no transform.
+        """ for a point (x0,y0) inside the boundary at z0, compute a new point (x,y) at z, accounting
+        for the z-variation of the Prim3D. should be implemented by inheriting classes, and 
+        should be vectorized if possible.
+
+        ARGS:
+            x0 (float or vector): reference x coordinate(s) inside the boundary at z0
+            y0 (float or vector): reference y coordinate(s) inside the boundary at z0
+            z0 (float): reference z coordiante
+            z (float): new z coordinate
+        RETURNS:
+            (tuple): a tuple containing:
+                - x1 (float or vector): the new x coordinate(s) at z
+                - y1 (float or vector): the new y coordinate(s) at z
+        """
         return x0, y0
 
     def make_poly_at_z(self, geom, z):
@@ -487,6 +565,14 @@ class Pipe(Prim3D):
     A Pipe is a 3D primitive with circular cross section at all z.
     """
     def __init__(self, n, label, res, rfunc, cfunc=(0,0)):
+        """
+        ARGS:
+            n: the refractive index inside the pipe
+            label: a string name to attach to this pipe
+            res: the number of line segments used to resolve the circle
+            rfunc: function that returns a circular radius for a given z, or scalar for constant behavior
+            cfunc: a function that returns a center position (xc,yc) for a given z, or tuple for constant behavior
+        """
         self.rfunc = rfunc if callable(rfunc) else lambda z: rfunc
         self.cfunc = cfunc if callable(cfunc) else lambda z: cfunc
         self.res = res
@@ -511,13 +597,25 @@ class LinearPipe(Pipe):
     A LinearPipe is a Pipe whose radius and centerpoint varies linearly.
     """
     def __init__(self, n, label, res, r1, r2, z_ex, c1=(0,0), c2=(0,0)):
+        """
+        ARGS:
+            n: the refractive index inside the pipe
+            label: a string name to attach to this pipe
+            res: the number of line segments used to resolve the circle
+            r1: the starting radius
+            r2: the ending radius
+            z_ex: the z distance between the start and end of the Pipe
+            c1: the starting centerpoint
+            c2: the ending centerpoint
+        """
         rfunc = lambda z: r1 + z/z_ex * (r2 - r1)
         cfunc = lambda z: (c1[0] + z/z_ex * (c2[0] - c1[0]), c1[1] + z/z_ex * (c2[1] - c1[1]))
         super().__init__(n, label, res, rfunc, cfunc)
 
 class Box(Prim3D):
-    """
-    A Box is a volume whose cross-section has a constant rectangular shape.
+    """ an Box is a volume whose cross-section has a constant rectangular shape.
+        because the shape does not change, we initialize according to the 'starting' box
+        geometry, unlike in Pipe where we initialized with functions.
     """
     def __init__(self, n, label, xmin, xmax, ymin, ymax):
         rect = Rectangle(n)
@@ -530,6 +628,14 @@ class BoxPipe(Prim3D):
     An box whose width, height, and center can scale with z.
     """
     def __init__(self, n, label, xwfunc, ywfunc, cfunc=(0,0)):
+        """ 
+        ARGS:
+            n : refractive index
+            label : string identifier for this waveguide part
+            xwfunc : a function controlling the width of the box wrt z, or scalar for constant x width
+            ywfunc : a function controlling the height of the box wrt z, or scalar for constant y width
+            cfunc : a function controlling the center of the box, or a tuple for constant center location (x0,y0)
+        """
         rect = Rectangle(n)
         super().__init__(rect, label)
         self.xwfunc = xwfunc if callable(xwfunc) else lambda z: xwfunc
@@ -552,6 +658,10 @@ class BoxPipe(Prim3D):
 
 #------------------------- Waveguide core and practical subclasses --------------------------#
 class Waveguide:
+    """ a Waveguide is a collection of prim3D objects (primitive 3D shapes like
+    circular pipes and boxes), organized into layers as a nested list. 
+    the refractive index of earlier layers is overwritten by later layers.
+    """
     isect_skip_layers = [0]
     mesh_dist_scale = 0.5
     mesh_dist_power = 1.0
@@ -565,6 +675,13 @@ class Waveguide:
     z_ex = None
 
     def __init__(self, prim3Dgroups):
+        """ initialize a Waveguide object.
+        
+        ARGS:
+            prim3Dgroups: a (potentially) nested list of prim3D objects. later
+                          top-level elements overwrite earlier ones, in terms
+                          of refractive index.
+        """
         self.xp = xp  # always numpy here (see module-level note)
         self.prim3Dgroups = prim3Dgroups
         self.IOR_dict = {}
@@ -589,6 +706,12 @@ class Waveguide:
         self.prim3Dsflat = prim3Dsflat
 
     def update(self, z):
+        """ update the mesh boundaries to the given z coordinate. 
+        
+        ARGS:
+            z (float):  desired z coordinate. note that all waveguides are 
+                        updated to z=0 upon initialization.
+        """
         for p in self.prim3Dgroups:
             if type(p) == list:
                 for _p in p:
@@ -640,6 +763,15 @@ class Waveguide:
         # Hot gmsh size callback: pure host scalar math.  Must stay on plain
         # numpy -- self.xp.zeros() under the JAX backend is immutable and the
         # ``dists[i] = ...`` writes below would raise.
+        """ compute a target mesh size (triangle side length) at the point (x,y). 
+        ARGS:
+            x: x point to compute mesh size at
+            y: y point to compute mesh size at
+            _scale: a factor that determines how quickly mesh size should increase away from primitive boundaries. higher = more quickly.
+            _power: another factor that determines how mesh size increases away from boundaries. default = 1 (linear increase). higher = more quickly.
+            min_size: the minimum mesh size that the algorithm can choose
+            max_size: the maximum mesh size that the algorithm can chooose
+        """
         prims = self.primsflat
         dists = np.zeros(len(prims))
         for i, p in enumerate(prims):
@@ -673,11 +805,21 @@ class Waveguide:
         return target_size
 
     def make_mesh(self, writeto=None):
+        """ construct a finite element mesh for the waveguide at current z (default 0).
+        
+        ARGS:
+            writeto (str or None): filename for mesh (no extension). if None, no file is saved.  
+        """
         m = self.make_mesh_bndry_ref(writeto)
         m.points = m.points[:, :2]
         return m
 
     def make_mesh_bndry_ref(self, writeto=None):
+        """ construct a mesh with boundary refinement at material interfaces.
+        
+        ARGS:
+            writeto (str or None): filename for mesh (no extension). if None, no file is saved.  
+        """
         _scale = self.mesh_dist_scale
         _power = self.mesh_dist_power
         min_mesh_size = self.min_mesh_size
@@ -918,7 +1060,16 @@ class Waveguide:
         return self.IOR_dict
 
     def plot_mesh(self, z=None, mesh=None, IOR_dict=None, alpha=0.1, ax=None, plot_points=True, verbose=True):
-        """Plot a mesh and associated refractive index distribution."""
+        """ plot a mesh and associated refractive index distribution
+        
+        ARGS:
+            z: the z coordinate for the mesh we want to plot. if None, z=0.
+            mesh: the mesh to be plotted. if None, we auto-compute a mesh using default values
+            IOR_dict: dictionary that assigns each named region in the mesh to a refractive index value
+            alpha: transparency of mesh lines
+            ax: optionally, pass in a matplotlib axis for the plotter
+            plot_points: controls if the mesh nodes will be plotted
+        """
         transformed_mesh = mesh
         if mesh is None:
             z = 0 if z is None else z
@@ -999,7 +1150,24 @@ class Waveguide:
         return new_point[0], new_point[1]
         
     def transform(self, x0, y0, z0, z):
-        """Backend-agnostic, works with both scalar and vector inputs."""
+        """ spatial transformation that should work with most meshes. kinda slow to compute currently, maybe could be sped up.
+        general idea: for a point (x0,y0) find the two nearest primitives at z0. this point, plus the two closest points to 
+        to it, each constrained to lie on a primitive boundary, define a triangle. At z, the primitive boundaries move, and so 
+        two of the triangle vertices move. this transformation places the third point of the triangle, which is (x,y), to
+        preserve triangle similarity.
+
+        ARGS:
+            x0 : (scalar or vector, if self.vectorized_transform) x coord. at z0
+            y0 : (scalar or vector, if self.vectorized_transform) y coord. at z0
+            z0 : reference z coord.
+            z : new z coord.
+
+        RETURNS:
+            (tuple) : a tuple containing:
+
+                - x (scalar or vector): the transformed x coordinate at z.
+                - y (scalar or vector): the transformed y coordinate at z.
+        """
         if not isinstance(x0, xp.ndarray):
             x0 = xp.array([x0])
             y0 = xp.array([y0])
@@ -1062,7 +1230,19 @@ class Waveguide:
         return npsx, npsy
 
     def deriv_transform(self, x0, y0, z0, z):
-        """Compute the derivative of the transformation law."""
+        """ compute the derivative of the transformation law. default 
+        implementation uses finite differences, but an explit law 
+        can be written for inheriting classes (e.g. PhotonicLantern).
+
+        ARGS:
+            x0 : (scalar or vector, if self.vectorized_transform) x coord. at z0
+            y0 : (scalar or vector, if self.vectorized_transform) y coord. at z0
+            z0 : reference z coord.
+            z : new z coord.
+        RETURNS:
+            x : the transformed x coordinate at z
+            y : the transformed y coordinate at z
+        """
         if self.z_invariant:
             return xp.zeros_like(x0), xp.zeros_like(y0)
         if self.vectorized_transform:
@@ -1079,7 +1259,16 @@ class Waveguide:
             return dx, dy
 
     def transform_mesh(self, mesh0, z0, z, mesh=None):
-        """Use the transformation law to create a new, transformed mesh from the reference mesh."""
+        """ use the transformation law to create a new, transformed 
+        mesh from the reference mesh.
+        
+        ARGS:
+            mesh0: the reference mesh (meshio object).
+            z0: the z coordinate corresponding to mesh0 (typically 0).
+            z: the desired z coordinate of the transformed mesh.
+            mesh: a mesh object to store the new mesh. if None, a new mesh
+            object is generated.
+        """
         if self.z_invariant or z0 == z:
             return mesh0
         if mesh is None:
@@ -1121,7 +1310,13 @@ class Waveguide:
         return _d
 
     def isolate(self, k):
-        """Create a refractive index dictionary that sets all channels except one to the background index."""
+        """ create a refractive index dictionary that sets all channels except one to the background index.
+        'channels' are assumed to be stored in the last list of self.prim3Dgroups. 
+        override this if your waveguide is different.
+        
+        ARGS:
+            k: index of the channel to isolate
+        """
         self.assign_IOR()
         IOR_dict = copy.copy(self.IOR_dict)
         if isinstance(self.prim3Dgroups[-2], list):
@@ -1135,10 +1330,21 @@ class Waveguide:
         return IOR_dict
 
 class CircularStepIndexFiber(Waveguide):
+    ''' generic class for a straight, circular step index fiber '''
     vectorized_transform = True
     recon_midpts = False
     z_invariant = True
     def __init__(self, rcore, rclad, ncore, nclad, core_res=16, clad_res=32):
+        """ initialize a circular step index fiber waveguide
+
+        ARGS: 
+            rcore: radius of core
+            rclad: radius of cladding
+            ncore: refractive index of the core
+            nclad: refractive index of the cladding
+            core_res: how many line segments to divide the core boundary into, default 16
+            clad_res: how many line segments to divide the cladding boundary into, default 32
+        """
         core = Pipe(ncore, "core", core_res, rcore, (0,0))
         clad = Pipe(nclad, "clad", clad_res, rclad, (0,0))
         core.mesh_size = 2*xp.pi*rcore/core_res
@@ -1147,10 +1353,23 @@ class CircularStepIndexFiber(Waveguide):
         super().__init__(els)
 
 class RectangularStepIndexFiber(Waveguide):
+    ''' generic class for a straight, rectangular step index fiber '''
     vectorized_transform = True
     recon_midpts = False
     z_invariant = True
     def __init__(self, xw, yw, xw_clad, yw_clad, ncore, nclad, core_mesh_size=None, clad_mesh_size=None):
+        """ intialize a waveguide with a rectangular core and cladding.
+
+        ARGS:
+            xw: width of the rectangular core
+            yw: height of the rectangular core
+            xw_clad: width of the cladding
+            yw_clad: height of the cladding
+            ncore: refractive index of the core
+            nclad: refractive index of the cladding
+            core_mesh_size: target mesh size inside the core; default is min(xw,yw)/10
+            clad_mesh_size: target mesh size in the cladding; default is min(xw_clad,yw_clad)/10
+        """
         core = BoxPipe(ncore, "core", xw, yw)
         clad = BoxPipe(nclad, "clad", xw_clad, yw_clad)
         core.mesh_size = min(xw, yw)/10 if core_mesh_size is None else core_mesh_size
@@ -1169,6 +1388,24 @@ class PhotonicLantern(Waveguide):
 
     def __init__(self, core_pos, rcores, rclad, rjack, ncores, nclad, njack,
                  z_ex, taper_factor, core_res=30, clad_res=60, jack_res=30, core_mesh_size=None, clad_mesh_size=None):
+        ''' initialize a photonic lantern waveguide.
+
+        ARGS: 
+            core_pos: an Nx2 array of (x,y) core positions at z=0
+            rcores: an array of core radii at z=0
+            rclad: the cladding radius at z=0
+            rjack: the jacket radius at z=0 (this sets the outer simulation boundary)
+            ncores: an array of refractive indices for the cores
+            nclad: the cladding refractive index
+            njack: the jacket refractive index
+            z_ex: the lantern length
+            taper_factor: the amount the lantern scales by, going from z=0 -> z=z_ex
+            core_res: number of line segments to resolve each core-cladding boundary with
+            clad_res: number of line segments to resolve the cladding-jacket boundary
+            jack_res: number of line segments to resolve the outer jacket boundary
+            core_mesh_size: target side length for triangles inside a core. defaults to the size set by core_res
+            clad_mesh_size: target side length for triangles inside the cladding. defaults to the size set by clad_res
+        '''
         if core_mesh_size is None:            
             core_mesh_size = 2 * xp.pi * xp.mean(xp.asarray(rcores)) / core_res
         if clad_mesh_size is None:
@@ -1221,6 +1458,7 @@ class PhotonicLantern(Waveguide):
         return IOR_dict
 
 class TestPhotonicLantern(PhotonicLantern):
+    """ shorthand for doctesting """
     def __init__(self):
         taper_factor = 8.
         rcore = 2.2 / taper_factor
@@ -1249,6 +1487,22 @@ class Dicoupler(Waveguide):
 
     def __init__(self, rcore1, rcore2, ncore1, ncore2, dmax, dmin, nclad, coupling_length, a, 
                  core_res, core_mesh_size, clad_mesh_size):
+        """ initialize a directional coupler waveguide.
+
+        ARGS:
+            rcore1: the core radius of the left single mode channel
+            rcore2: the core radius of the right single mode channel
+            ncore1: the index of the left channel
+            ncore2: the index of the right channel
+            dmax: the starting core separation
+            dmin: the minimum core separation
+            nclad: the cladding index
+            coupling_length: the approximate length in z over which the core separation is dmin
+            a: the approximate bend length
+            core_res: the # of segments used to resolve the core-cladding interface
+            core_mesh_size: the target mesh size inside cores
+            clad_mesh_size: the target mesh size inside the cladding
+        """
         z_ex = coupling_length * 2
 
         def c2func(z):
@@ -1261,7 +1515,7 @@ class Dicoupler(Waveguide):
 
         def c1func(z): return -c2func(z)
 
-        def dfunc(z): return c2func(z)[0]-c1func(z)[0]
+        def dfunc(z): return c2func(z)[0]-c1func(z)[0]  # inter core spacing function
 
         self.c1func = c1func
         self.c2func = c2func
@@ -1320,6 +1574,20 @@ class Tricoupler(Waveguide):
     recon_midpts = True
 
     def __init__(self, rcore, ncore, dmax, dmin, nclad, coupling_length, a, core_res, core_mesh_size, clad_mesh_size):
+        """ initialize a tricoupler waveguide.
+
+        ARGS:
+            rcore: the core radius, shared for all single mode channels
+            ncore: the refractive index for all single mode channels
+            dmax: the diameter of the circle containing the center of each channel, at max separation
+            dmin: the diameter of the circle containing the center of each channel, at min separation
+            nclad: the cladding index
+            coupling_length: the approximate length in z over which the core separation is dmin
+            a: the approximate bend length
+            core_res: the # of segments used to resolve the core-cladding interface
+            core_mesh_size: the target mesh size inside cores
+            clad_mesh_size: the target mesh size inside the cladding
+        """
         z_ex = coupling_length * 2
 
         def c1func(z):
@@ -1401,6 +1669,21 @@ class PlanarTricoupler(Tricoupler):
 
     def __init__(self, rcore_center, rcore_outer, ncore, dmax, dmin, nclad,
                  coupling_length, a, core_res, core_mesh_size, clad_mesh_size):
+        """ initialize a planar tricoupler waveguide.
+
+        ARGS:
+            rcore_center: the core radius of the center channel
+            rcore_outer: the core radius of the outer channel
+            ncore: the refractive index for all single mode channels
+            dmax: the distance between the left and right channels, at max separation
+            dmin: the distance between the left and right channels, at min separation
+            nclad: the cladding index
+            coupling_length: the approximate length in z over which the core separation is dmin
+            a: the approximate bend length
+            core_res: the # of segments used to resolve the core-cladding interface
+            core_mesh_size: the target mesh size inside cores
+            clad_mesh_size: the target mesh size inside the cladding
+        """
         z_ex = coupling_length * 2
         def c1func(z):
             if z <= z_ex/2:
@@ -1451,6 +1734,23 @@ class OAMPhotonicLantern(PhotonicLantern):
                  nclad, njack, z_ex, taper_factor, core_res, clad_res_outer,
                  clad_res_inner, jack_res, core_mesh_size=0.05, clad_mesh_size=0.2, inner_clad_mesh_size=0.2):
 
+        ''' ARGS: 
+            ring_radius: radius of cladding annulus (avg)
+            ring_width: width of cladding annulus
+            rcores: an array of core radii at z=0. the first value is placed in the middle; the rest spaced evenly in the ring
+            rjack: the jacket radius at z=0 (this sets the outer simulation boundary)
+            ncores: an array of refractive indices for the cores
+            nclad: the cladding annulus refractive index
+            njack: the jacket refractive index
+            z_ex: the lantern length
+            taper_factor: the amount the lantern scales by, going from z=0 -> z=z_ex
+            core_res: the number of line segments to resolve each core-cladding boundary with
+            clad_res_outer: the number of line segments to resolve the outer cladding annulus boundary
+            clad_res_inner: the number of line segments to resolve the inner cladding annulus boundary
+            jack_res: the number of line segments to resolve the outer jacket boundary
+            core_mesh_size: the target side length for triangles inside a lantern core, away from the boundary
+            clad_mesh_size: the target side length for triangles inside the lantern cladding, away from the boundary
+        '''
         N_outer = len(rcores)
         core_pos = xp.array([[ring_radius*xp.cos(i*2*xp.pi/N_outer),
                               ring_radius*xp.sin(i*2*xp.pi/N_outer)] for i in range(N_outer)])
