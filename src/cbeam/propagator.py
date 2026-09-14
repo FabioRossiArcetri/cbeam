@@ -93,24 +93,39 @@ def plot_field(field, mesh, ax=None, show_mesh=False):
 class Propagator:
     """Class for coupled-mode propagation of tapered waveguides."""
 
+    ## high level parameters
+
     # -- propagation params --------------------------------------------------
+    #: str: solving method for scipy's solve_ivp, default "RK45"
     solver = "RK45"
     #: bool: whether to include the WKB-like correction term
     WKB    = True
 
     # -- z-stepping params ---------------------------------------------------
+    #: float: controls adaptive stepping. higher = more steps (more accurate).
+    #: this is base 10 logarithmic. if you want to reduce tolerance by 10x, set to 1, etc.
     z_acc       = 0.
+    #: float or None: set to a numeric value to use a fixed zstep
     fixed_zstep = None
+    #: float: minimum z step value when computing modes.
     min_zstep      = 0.625
+    #: float: minimum z step value when computing effective indices
     min_zstep_neff = 10.
+    #: float: maximum z step value when computing modes or effective indices
     max_zstep      = float('inf')   # plain Python float — no backend dependency
+    #: float: starting z step
     init_zstep     = 10.
 
     # -- misc ----------------------------------------------------------------
+    #: the minimum difference in effective index two modes can have before they are considered degenerate
     degen_crit          = 1e-5
     degen_groups        = []
+    #: list: used to zero certain modes during calculations. useful if there's a cladding mode
+    #: which is behaving erratically and slowing down the adaptive stepping.
     skipped_modes       = []
+    #: bool: whether the propagator is allowed to swap modes (to track them through eigenvalue crossings)
     allow_swaps         = True
+    #: str: mode for coupling matrix calculation, "from_wvg" or "from_interp"
     cmat_correction_mode = "from_interp"
 
     # =========================================================================
@@ -197,6 +212,7 @@ class Propagator:
         """
 
         # z-invariant waveguide shortcut
+        # z invariant wvg handling
         if self.wvg.z_invariant:
             ps          = "_" + tag if tag is not None else ""
             meshwriteto = (self.save_dir + "/meshes/mesh" + ps) if save else None
@@ -212,6 +228,7 @@ class Propagator:
             self.make_interp_funcs_zinv()
             return zs, neffs, vs, None
 
+        # normal handling
         start_time = time.time()
         self.compute_modes(zi, zf, mesh, tag, save)
         self.compute_cmats(save=save, tag=tag)
@@ -221,29 +238,6 @@ class Propagator:
 
     # alias
     prop_setup = characterize
-
-    def apply_phase(self, u, z, zi=None):
-        """ apply :math:`e^{i \\beta_j z}` phase variation to the mode amplitude of eigenmode j
-        with propagation constant :math:`\\beta_j`.
-        
-        ARGS:
-            u: mode amplitude vector
-            z: z coord. that u is evaluated at
-            zi (opt.) the starting z coordinate to measure the change in phase from. 
-        """
-        if zi is None:
-            zi = self.zs[0]
-        # u may arrive as a python list; ``list * jax_array`` raises (numpy would
-        # broadcast).  Coerce first so both backends behave the same.
-        u = self.xp.asarray(u)
-        phase = self.xp.exp(
-            1.j * self.k * self.xp.array(self.get_int_neff(z) - self.get_int_neff(zi))
-        )
-        return u * phase
-
-    # -------------------------------------------------------------------------
-    # propagate
-    # -------------------------------------------------------------------------
 
     def propagate(self, u0, zi=None, zf=None):
         """ propagate a launch wavefront, expressed in the basis of initial eigenmodes, to z = zf 
@@ -270,6 +264,7 @@ class Propagator:
         if zf is None:
             zf = float(self.zs[-1])
 
+        # z invariant case
         if len(self.zs) == 1:
             return self.zs, self.xp.array([u0]), self.apply_phase(u0, zf, zi)
         if zi > zf:
@@ -365,11 +360,35 @@ class Propagator:
                 us_grid = sol.y.T
                 uf_flat = sol.y[:, -1]
 
+            # multiply by phase factors
             uf = self.apply_phase(uf_flat, sol.t[-1], zi)
             return sol.t, us_grid, uf
 
     # -------------------------------------------------------------------------
     # backpropagate
+    # -------------------------------------------------------------------------
+
+    def apply_phase(self, u, z, zi=None):
+        """ apply :math:`e^{i \\beta_j z}` phase variation to the mode amplitude of eigenmode j
+        with propagation constant :math:`\\beta_j`.
+        
+        ARGS:
+            u: mode amplitude vector
+            z: z coord. that u is evaluated at
+            zi (opt.) the starting z coordinate to measure the change in phase from. 
+        """
+        if zi is None:
+            zi = self.zs[0]
+        # u may arrive as a python list; ``list * jax_array`` raises (numpy would
+        # broadcast).  Coerce first so both backends behave the same.
+        u = self.xp.asarray(u)
+        phase = self.xp.exp(
+            1.j * self.k * self.xp.array(self.get_int_neff(z) - self.get_int_neff(zi))
+        )
+        return u * phase
+
+    # -------------------------------------------------------------------------
+    # propagate
     # -------------------------------------------------------------------------
 
     def backpropagate(self, uf, zi=None, zf=None):
@@ -473,6 +492,7 @@ class Propagator:
                 us_grid = sol.y.T
                 uf_flat = sol.y[:, -1]
 
+            # multiply by phase factors
             ui = self.apply_phase(uf_flat, zi, zf)
             return sol.t, us_grid, ui
 
@@ -502,7 +522,7 @@ class Propagator:
         ps          = "_" + tag if tag is not None else ""
         meshwriteto = (self.save_dir + "/meshes/mesh" + ps) if save else None
         if mesh is None:
-            mesh = self.generate_mesh(meshwriteto)
+            mesh = self.generate_mesh(meshwriteto)  # use default vals
         self.mesh = mesh
         print("mesh has ", len(self.mesh.points), " points")
         zstep0      = self.init_zstep if self.fixed_zstep is None else self.fixed_zstep
@@ -529,6 +549,7 @@ class Propagator:
                                           kind=_N-1, axis=0, fill_value="extrapolate")
                     self.track_modes(vs[-1], v, neff_interp(z), neff)
                 else:
+                    #neff_interp = interp1d(zs[-4:],np.array(neffs)[-4:,:],axis=0,kind=3,fill_value='extrapolate',assume_sorted=True)
                     neff_interp = myCubicSpline(zs[-4:], neffs[-4:], axis=0)
                     self.track_modes(vs[-1], v, neff_interp(z), neff)
 
@@ -570,7 +591,7 @@ class Propagator:
         self.neffs_funcs = neff_funcs
         self.neffs = neffs
         self.zs    = zs
-        self.vs    = vs
+        self.vs    = vs  # these modes may be inaccurate if there are degeneracies
         if save:
             self.save(zs, None, neffs, vs, tag=tag)
         self.make_interp_funcs(zs, make_cmat=False)
@@ -604,9 +625,10 @@ class Propagator:
         fixed_step = self.fixed_zstep
         min_zstep  = self.min_zstep
         max_zstep  = self.max_zstep
-        zstep0     = self.init_zstep if fixed_step is None else fixed_step
+        zstep0     = self.init_zstep if fixed_step is None else fixed_step  # starting step
 
-        self.wvg.update(0)
+        self.wvg.update(0)  # always initialize at 0, and adjust to any non-zero zi values
+        # vs_dec: a decimated version of vs, used to control adaptive stepping
         neffs, vs, vs_dec, zs = [], [], [], []
         meshpoints = []
         vinterp    = None
@@ -651,8 +673,9 @@ class Propagator:
                 self.avg_degen_neff(gr, neff)
             v = self._zero_skipped(v)
 
+            # produce an average down version of modes to control adaptive stepping
             vdec = self.decimate(v)
-            if len(vs) < 4 or fixed_step:
+            if len(vs) < 4 or fixed_step:  # accept the first four computations
                 neffs.append(neff); zs.append(z); vs.append(v); vs_dec.append(vdec)
                 if self.cmat_correction_mode == "from_interp" and not self.wvg.linear:
                     meshpoints.append(self.xp.copy(_mesh.points[:, :2]))
@@ -663,6 +686,7 @@ class Propagator:
                 z = min(zf, z + zstep0)
                 continue
             else:
+                # interpolate the modes
                 vinterp = myCubicSpline(self.xp.array(zs[-4:]), vs_dec[-4:], axis=0)
                 refac   = self._ref_fac_v(vdec, vs_dec[-1], vinterp(z))
                 if refac >= 0 or zstep0 == min_zstep:
@@ -760,6 +784,8 @@ class Propagator:
         points0 = mesh.points.T[:2, :]
         for i, z in enumerate(zs):
             print("\rcurrent z: {0} / {1}        ".format(z, zf), end='', flush=True)
+            # the derivative measured by the interpolant comoves with mesh points
+            # need to subtract out the x,y component to isolate partial z derivative
             if self.cmat_correction_mode == "from_interp":
                 if _linear:
                     _mesh.points[:] = points(z)
@@ -783,6 +809,133 @@ class Propagator:
         if save:
             self.save(cmats=cmats, tag=tag)
         return cmats
+
+    # =========================================================================
+    # Misc maths helpers
+    # =========================================================================
+
+    def make_sign_consistent(self, v, _v):
+        """ alter the eigenmodes _v, assumed to be similar to v, so that they 
+        have consistent overall sign with v. """
+        flip_mask = (self.xp.sum(self.xp.abs(v - _v), axis=1) >
+                     self.xp.sum(self.xp.abs(v + _v), axis=1))
+        _v[flip_mask] *= -1
+        return flip_mask
+
+    def inner_product(self, v1, v2, B):
+        """ compute the inner product (or overlap integral) between fields v1 & v2, which are on the same mesh.
+            this requires mesh information, either by passing in the mesh explicitly or by 
+            passing in the B matrix. this is the matrix on the RHS of the generalized
+            eigenvalue problem and can be calculated e.g. with wavesolve.FEsolver.construct_B()
+
+            the inner product is v1.T * B * v2 , where * is matrix mul.
+        """
+        # this is just v1^T B v2
+        # using dot() (as opposed to np.tensordot) gives a speedup when B is sparse
+        return B.dot(v1.T).T.dot(v2.T)
+
+    def _zero_skipped(self, resids):
+        """Zero the rows of `resids` at `self.skipped_modes` without in-place
+        mutation, so it also works on immutable JAX arrays.  Multiplying by an
+        exact 0/1 mask is bit-identical to ``resids[skipped] = 0`` for finite
+        input."""
+        if not len(self.skipped_modes):
+            return resids
+        keep = np.ones(resids.shape[0])
+        keep[list(self.skipped_modes)] = 0.0
+        return resids * keep.reshape((-1,) + (1,) * (resids.ndim - 1))
+
+    def _ref_fac_v(self, v, vlast, vi):
+        resids = self._zero_skipped(v - vi)
+        err = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
+        tol = (max(self.xp.sqrt(self.xp.mean(self.xp.power(v - vlast, 2))) / 100., 1e-7)
+               * self.xp.power(10., -float(self.z_acc)))
+        if err < 0.1 * tol:
+            return 1
+        elif err > tol:
+            return -1
+        return 0
+
+    def _ref_fac_n(self, ninterp, n, nlast):
+        resids = self._zero_skipped(ninterp - n)
+        err   = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
+        nsort = sorted(nlast, reverse=True)
+        tol   = (max((nsort[0] - nsort[1]) / 100., 1e-9)
+                 * self.xp.power(10., -float(self.z_acc)))
+        if 0.1 * tol < err < tol:
+            return 0
+        elif err < 0.1 * tol:
+            return 1
+        return -1
+
+    # =========================================================================
+    # I/O utility
+    # =========================================================================
+
+    def check_and_make_folders(self):
+        for sq in ['', 'eigenmodes', 'eigenvalues', 'cplcoeffs',
+                   'zvals', 'meshes', 'meshpoints']:
+            d = os.path.join(self.save_dir, sq)
+            if not os.path.exists(d):
+                os.makedirs(d)
+
+    def save(self, zs=None, cmats=None, neffs=None, vs=None,
+             meshpoints=None, tag=""):
+        ps = "" if tag == "" else "_" + tag
+        if vs is not None:
+            vs = self.xp.array(vs)  # eigenmode array is (KxNxM) for M mesh points, N eigenmodes, and K z values
+            self.xp.save(self.save_dir + '/eigenmodes/eigenmodes' + ps, vs)
+        if cmats is not None:
+            self.xp.save(self.save_dir + '/cplcoeffs/cplcoeffs' + ps, cmats)
+        if neffs is not None:
+            self.xp.save(self.save_dir + '/eigenvalues/eigenvalues' + ps, neffs)
+        if zs is not None:
+            self.xp.save(self.save_dir + '/zvals/zvals' + ps, zs)
+        if meshpoints is not None and len(meshpoints) > 0:
+            self.xp.save(self.save_dir + '/meshpoints/meshpoints' + ps, meshpoints)
+
+    def load(self, tag=""):
+        """ load the z values, effective indices, mode profiles, coupling coefficients, and mesh points
+        saved to files specified by <tag>.
+        """
+        ps = "" if tag == "" else "_" + tag
+        self.neffs = self.xp.load(self.save_dir + '/eigenvalues/eigenvalues' + ps + '.npy')
+        self.vs    = self.xp.load(self.save_dir + '/eigenmodes/eigenmodes'   + ps + '.npy')
+        self.zs    = self.xp.load(self.save_dir + '/zvals/zvals'             + ps + '.npy')
+        if self.Nmax is None:
+            self.Nmax = len(self.neffs[0])
+        self._channel_basis_z     = None
+        self.channel_basis_matrix = None  # clear old matrix
+        self._splines_ready       = False   # force rebuild after load
+
+        try:
+            self.cmats = self.xp.load(self.save_dir + '/cplcoeffs/cplcoeffs' + ps + '.npy')
+            if len(self.zs) > 1:
+                self.make_interp_funcs(self.zs, make_cmat=True,
+                                       make_neff=True, make_v=True)
+            else:
+                self.make_interp_funcs_zinv()
+        except Exception:
+            print("no coupling matrix file found … skipping")
+
+        try:
+            self.meshpoints = self.xp.load(
+                self.save_dir + '/meshpoints/meshpoints' + ps + '.npy')
+        except Exception:
+            print("no mesh points found … skipping")
+
+        self.mesh    = load_meshio_mesh(self.save_dir + '/meshes/mesh' + ps)
+        self.points0 = self.xp.copy(self.mesh.points)
+
+        if self.Nmax is None:
+            self.Nmax = self.neffs.shape[1]
+
+        # Rebuild interpolants if they were not built above (e.g. no cmats file)
+        if len(self.zs) > 1:
+            self.make_interp_funcs(self.zs, make_cmat=False,
+                                   make_neff=True, make_v=True)
+        else:
+            self.make_interp_funcs_zinv()
 
     # =========================================================================
     # Interpolation construction  —  single source of truth
@@ -930,6 +1083,9 @@ class Propagator:
 
     def make_interp_funcs_zinv(self):
         """Create interpolation callables for z-invariant waveguides."""
+        #self.neffs_funcs = [lambda z: neff for neff in self.neffs[0]]
+        #self.neffs_int_funcs = [lambda z: z*neff for neff in self.neffs[0]]
+        #self.neffs_dif_funcs = [lambda z: 0 for neff in self.neffs[0]]
         _v_zinv        = self.vs[0]
         _neff_zinv     = self.neffs[0]
         _neff_dif_zinv = self.xp.zeros_like(self.neffs[0])
@@ -986,157 +1142,6 @@ class Propagator:
         return -0.5 * dbeta_dz / (self.k * self.get_neff(z))
 
     # =========================================================================
-    # I/O utility
-    # =========================================================================
-
-    def check_and_make_folders(self):
-        for sq in ['', 'eigenmodes', 'eigenvalues', 'cplcoeffs',
-                   'zvals', 'meshes', 'meshpoints']:
-            d = os.path.join(self.save_dir, sq)
-            if not os.path.exists(d):
-                os.makedirs(d)
-
-    def save(self, zs=None, cmats=None, neffs=None, vs=None,
-             meshpoints=None, tag=""):
-        ps = "" if tag == "" else "_" + tag
-        if vs is not None:
-            vs = self.xp.array(vs)
-            self.xp.save(self.save_dir + '/eigenmodes/eigenmodes' + ps, vs)
-        if cmats is not None:
-            self.xp.save(self.save_dir + '/cplcoeffs/cplcoeffs' + ps, cmats)
-        if neffs is not None:
-            self.xp.save(self.save_dir + '/eigenvalues/eigenvalues' + ps, neffs)
-        if zs is not None:
-            self.xp.save(self.save_dir + '/zvals/zvals' + ps, zs)
-        if meshpoints is not None and len(meshpoints) > 0:
-            self.xp.save(self.save_dir + '/meshpoints/meshpoints' + ps, meshpoints)
-
-    def load(self, tag=""):
-        """ load the z values, effective indices, mode profiles, coupling coefficients, and mesh points
-        saved to files specified by <tag>.
-        """
-        ps = "" if tag == "" else "_" + tag
-        self.neffs = self.xp.load(self.save_dir + '/eigenvalues/eigenvalues' + ps + '.npy')
-        self.vs    = self.xp.load(self.save_dir + '/eigenmodes/eigenmodes'   + ps + '.npy')
-        self.zs    = self.xp.load(self.save_dir + '/zvals/zvals'             + ps + '.npy')
-        if self.Nmax is None:
-            self.Nmax = len(self.neffs[0])
-        self._channel_basis_z     = None
-        self.channel_basis_matrix = None
-        self._splines_ready       = False   # force rebuild after load
-
-        try:
-            self.cmats = self.xp.load(self.save_dir + '/cplcoeffs/cplcoeffs' + ps + '.npy')
-            if len(self.zs) > 1:
-                self.make_interp_funcs(self.zs, make_cmat=True,
-                                       make_neff=True, make_v=True)
-            else:
-                self.make_interp_funcs_zinv()
-        except Exception:
-            print("no coupling matrix file found … skipping")
-
-        try:
-            self.meshpoints = self.xp.load(
-                self.save_dir + '/meshpoints/meshpoints' + ps + '.npy')
-        except Exception:
-            print("no mesh points found … skipping")
-
-        self.mesh    = load_meshio_mesh(self.save_dir + '/meshes/mesh' + ps)
-        self.points0 = self.xp.copy(self.mesh.points)
-
-        if self.Nmax is None:
-            self.Nmax = self.neffs.shape[1]
-
-        # Rebuild interpolants if they were not built above (e.g. no cmats file)
-        if len(self.zs) > 1:
-            self.make_interp_funcs(self.zs, make_cmat=False,
-                                   make_neff=True, make_v=True)
-        else:
-            self.make_interp_funcs_zinv()
-
-    # =========================================================================
-    # Misc maths helpers
-    # =========================================================================
-
-    def make_sign_consistent(self, v, _v):
-        """ alter the eigenmodes _v, assumed to be similar to v, so that they 
-        have consistent overall sign with v. """
-        flip_mask = (self.xp.sum(self.xp.abs(v - _v), axis=1) >
-                     self.xp.sum(self.xp.abs(v + _v), axis=1))
-        _v[flip_mask] *= -1
-        return flip_mask
-
-    def inner_product(self, v1, v2, B):
-        """ compute the inner product (or overlap integral) between fields v1 & v2, which are on the same mesh.
-            this requires mesh information, either by passing in the mesh explicitly or by 
-            passing in the B matrix. this is the matrix on the RHS of the generalized
-            eigenvalue problem and can be calculated e.g. with wavesolve.FEsolver.construct_B()
-
-            the inner product is v1.T * B * v2 , where * is matrix mul.
-        """
-        return B.dot(v1.T).T.dot(v2.T)
-
-    def _zero_skipped(self, resids):
-        """Zero the rows of `resids` at `self.skipped_modes` without in-place
-        mutation, so it also works on immutable JAX arrays.  Multiplying by an
-        exact 0/1 mask is bit-identical to ``resids[skipped] = 0`` for finite
-        input."""
-        if not len(self.skipped_modes):
-            return resids
-        keep = np.ones(resids.shape[0])
-        keep[list(self.skipped_modes)] = 0.0
-        return resids * keep.reshape((-1,) + (1,) * (resids.ndim - 1))
-
-    def _ref_fac_v(self, v, vlast, vi):
-        resids = self._zero_skipped(v - vi)
-        err = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
-        tol = (max(self.xp.sqrt(self.xp.mean(self.xp.power(v - vlast, 2))) / 100., 1e-7)
-               * self.xp.power(10., -float(self.z_acc)))
-        if err < 0.1 * tol:
-            return 1
-        elif err > tol:
-            return -1
-        return 0
-
-    def _ref_fac_n(self, ninterp, n, nlast):
-        resids = self._zero_skipped(ninterp - n)
-        err   = self.xp.sqrt(self.xp.mean(self.xp.power(resids, 2)))
-        nsort = sorted(nlast, reverse=True)
-        tol   = (max((nsort[0] - nsort[1]) / 100., 1e-9)
-                 * self.xp.power(10., -float(self.z_acc)))
-        if 0.1 * tol < err < tol:
-            return 0
-        elif err < 0.1 * tol:
-            return 1
-        return -1
-
-    # =========================================================================
-    # Mesh generation
-    # =========================================================================
-
-    def generate_mesh(self, writeto=None):
-        """ generate a mesh for the loaded waveguide according to class attributes.
-        
-        ARGS:
-            writeto (str or None): set to a str (the filename) to write the mesh to file. 
-        """
-        return self.wvg.make_mesh(writeto=writeto)
-
-    def make_mesh_at_z(self, z):
-        """ make the mesh corresponding to the waveguide cross-section at z. 
-        
-        ARGS:
-            z: z coordinate for the mesh.
-        
-        RETURNS:
-            (meshio mesh): the corresponding mesh at z.
-        """
-        mesh = self.generate_mesh() if self.mesh is None else self.mesh
-        if z == 0:
-            return copy.deepcopy(mesh)
-        return self.wvg.transform_mesh(mesh, 0, z)
-
-    # =========================================================================
     # Field construction helpers
     # =========================================================================
 
@@ -1169,13 +1174,17 @@ class Propagator:
         self.wvg.assign_IOR()
         wvg_dim = len(self.wvg.prim3Dgroups[-1])
         npts    = m.points.shape[0]
+        # array to store the new basis
         # Built row-by-row from solve_waveguide (host) output -> plain numpy so
         # the item assignment works on the JAX backend too.  Consumed host-side
         # by compute_change_of_basis / inner_product.
         _v      = np.zeros((wvg_dim, npts), dtype=np.complex128)
         for i in range(wvg_dim):
+            # use the PhotonicLantern.isolate() function to make a new dictionary of
+            # refractive index values which isolates a single core
             _dict = self.wvg.isolate(i)
             try:
+                # then pass the new dictionary into the eigenmode solver
                 _wi, _vi, _Ni = solve_waveguide(m, self.wl, _dict, sparse=True, Nmax=1)
             except Exception as exc:
                 raise RuntimeError(
@@ -1187,8 +1196,10 @@ class Propagator:
                     f"isolated-basis shape mismatch at z={z}: "
                     f"got {_vi.shape[0]} points, expected {npts}"
                 )
+            # attempt consistent sign
             if float(np.real(np.sum(_vi))) < 0.0:
                 _vi = -_vi
+            # save the "port" eigenmode into _v
             _v[i, :] = _vi
         return _v
 
@@ -1288,17 +1299,21 @@ class Propagator:
         mesh  = self.make_mesh_at_z(z) if mesh is None else mesh
         B     = construct_B(self.mesh, sparse=True)
         basis = self.get_v(z)
+        # take inner product between field and basis modes
         amps  = [self.inner_product(basis[i], field, B)
                  for i in range(basis.shape[0])]
         return self.xp.array(amps)
 
     def decimate(self, arr, outsize=10, axis=1):
+        #default is really avg down to 10 vals, not decimation
         split_arrs = self.xp.array_split(arr, outsize, axis=axis)
         return self.xp.array([self.xp.mean(a, axis=axis) for a in split_arrs]).T
 
     def swap_modes(self, w, _w, _v):
         """ permute _w so that it matches w as close as possible.
         permute _v in the same way. """
+        # it is mind-blowing that this function works lmao
+        # it's so simple ... and confusing
         sidxs   = self.xp.argsort(w)[::-1]
         indices = self.xp.argsort(sidxs)
         return _v[indices], _w[indices]
@@ -1364,6 +1379,32 @@ class Propagator:
             M   = len(out)
             mat[:M, j] = out
         return mat
+
+    # =========================================================================
+    # Mesh generation
+    # =========================================================================
+
+    def generate_mesh(self, writeto=None):
+        """ generate a mesh for the loaded waveguide according to class attributes.
+        
+        ARGS:
+            writeto (str or None): set to a str (the filename) to write the mesh to file. 
+        """
+        return self.wvg.make_mesh(writeto=writeto)
+
+    def make_mesh_at_z(self, z):
+        """ make the mesh corresponding to the waveguide cross-section at z. 
+        
+        ARGS:
+            z: z coordinate for the mesh.
+        
+        RETURNS:
+            (meshio mesh): the corresponding mesh at z.
+        """
+        mesh = self.generate_mesh() if self.mesh is None else self.mesh
+        if z == 0:
+            return copy.deepcopy(mesh)
+        return self.wvg.transform_mesh(mesh, 0, z)
 
     # =========================================================================
     # Plotting
@@ -1434,6 +1475,7 @@ class Propagator:
         neffs = self.neffs.T
         for i in range(self.Nmax):
             plt.plot(self.zs, neffs[i], label="mode " + str(i))
+        # plot vertical bars at every z value.
         for z in self.zs:
             plt.axvline(x=z, alpha=0.05, color='k', zorder=-100)
         plt.xlabel(r"$z$")
@@ -1457,6 +1499,7 @@ class Propagator:
                 plt.semilogy(self.zs, neffs[0] - neffs[i], label="mode " + str(i))
             else:
                 plt.plot(self.zs, neffs[0] - neffs[i], label="mode " + str(i))
+        # plot vertical bars at every z value.
         for z in self.zs:
             plt.axvline(x=z, alpha=0.05, color='k', zorder=-100)
         plt.xlabel(r"$z$")
@@ -1489,6 +1532,7 @@ class Propagator:
                 ax.plot(self.zs, self.cmats[:, i, j],
                         label=str(i)+str(j),
                         ls=line_styles[i % 5], c=colors[j % 9])
+        # plot vertical bars at every z value.
         for z in self.zs:
             ax.axvline(x=z, alpha=0.05, color='k', zorder=-100)
         if legend:
@@ -1586,6 +1630,7 @@ class Propagator:
                 slider.set_val(zi)
         if plot:
             plt.show()
+        # a reference to the slider needs to be preserved to prevent gc :/
         return slider
 
 
@@ -1633,7 +1678,7 @@ class ChainPropagator(Propagator):
         first   = True
 
         while z < zf - 1e-10:
-            p           = self.get_prop(z + 1e-8)
+            p           = self.get_prop(z + 1e-8)  # a little cheap lol
             segment_end = min(p.zs[-1], zf)
             if segment_end - z < 1e-10:
                 z = segment_end
