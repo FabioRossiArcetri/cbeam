@@ -981,8 +981,9 @@ class Propagator:
             make_cmat (bool): set True to make coupling matrix interpolation function
             make_v (bool): set True to make eigenmode interpolation function
 
-        This is the *single* place where splines are constructed. It fully
-        replaces the old ``_prepare_jax_splines`` duplication.
+        This is the *single* place where splines are constructed. (An
+        earlier ``_prepare_jax_splines`` duplicated this as a lazy-rebuild
+        guard with no actual callers; removed.)
         """
         if zs is None:
             zs = self.xp.copy(self.zs)
@@ -1095,26 +1096,6 @@ class Propagator:
             if make_v and self.vs is not None:
                 self.get_v = myCubicSpline(zs, self.vs, axis=0)
             
-    def _prepare_jax_splines(self):
-        """Ensure JAX splines are initialised.
-
-        This is now a lightweight guard: ``make_interp_funcs`` is the single
-        source of truth.  If it has already been called (the normal case), this
-        is a no-op.  It is kept so that existing call-sites in ``load()`` and
-        ``characterize()`` continue to work without change.
-        """
-        if self.backend != "jax":
-            return
-        if getattr(self, "_splines_ready", False):
-            return
-        if self.zs is not None and len(self.zs) > 1:
-            self.make_interp_funcs(
-                self.zs,
-                make_cmat=(self.cmats is not None),
-                make_neff=(self.neffs is not None),
-                make_v=(self.vs is not None),
-            )
-
     def make_interp_funcs_zinv(self):
         """Create interpolation callables for z-invariant waveguides."""
         #self.neffs_funcs = [lambda z: neff for neff in self.neffs[0]]
@@ -1262,8 +1243,17 @@ class Propagator:
                 )
                 return self._compute_isolated_basis_at_z(z_fallback)
             except Exception as exc_fallback:
+                # Fold both failures into the message itself, not just the
+                # exception chain: __context__/__cause__ already preserve
+                # exc_primary in a full traceback (Python chains it in
+                # automatically since it's raised while exc_primary is still
+                # being handled), but that's only visible if something prints
+                # the whole chain. A log or error tracker that captures only
+                # str(exception) would otherwise lose which z the *original*
+                # failure was at.
                 raise RuntimeError(
-                    f"isolated-basis failed at z={z} and fallback z={z_fallback}"
+                    f"isolated-basis failed at z={z} ({exc_primary!r}) and "
+                    f"fallback z={z_fallback} ({exc_fallback!r})"
                 ) from exc_fallback
 
     def to_channel_basis(self,uf,z=None):   

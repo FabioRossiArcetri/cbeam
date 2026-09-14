@@ -138,6 +138,29 @@ class TestHelpers:
         assert neffs[1] == pytest.approx(1.41)
         assert neffs[2] == pytest.approx(1.41)
 
+    def test_compute_isolated_basis_reports_both_failures(self, prop, monkeypatch):
+        # If the requested z fails *and* the fallback (output end) also
+        # fails, the final error must name both failures, not just the
+        # fallback's -- a log or error tracker that captures only
+        # str(exception), rather than the full chained traceback, would
+        # otherwise lose which z the original failure was at.
+        prop.zs = np.array([0.0, 100.0])
+        attempted = []
+
+        def always_fails(z):
+            attempted.append(z)
+            raise ValueError(f"boom at z={z}")
+
+        monkeypatch.setattr(prop, "_compute_isolated_basis_at_z", always_fails)
+        with pytest.raises(RuntimeError) as excinfo:
+            prop.compute_isolated_basis(z=50.0)
+
+        assert attempted == [50.0, 100.0]  # requested z, then the fallback
+        msg = str(excinfo.value)
+        assert "boom at z=50.0" in msg
+        assert "boom at z=100.0" in msg
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
 
 # --------------------------------------------------------------------------- #
 # interpolation helpers
