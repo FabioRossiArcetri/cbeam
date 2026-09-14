@@ -147,9 +147,8 @@ class Propagator:
         self.backend = get_backend()
         self.xp      = get_xp()
         self.wvg = wvg
-        self.wl = wl
+        self._wl = wl
         self.Nmax = Nmax
-        self.k       = 2 * self.xp.pi / wl
 
         self.cmats = None
         self.neffs = None
@@ -171,6 +170,28 @@ class Propagator:
         self.save_dir = './data' if save_dir is None else save_dir
         self.check_and_make_folders()                
     
+    @property
+    def wl(self):
+        """The propagation wavelength. Read-only: a Propagator's mode data,
+        coupling matrices, and (on the jax backend) cached ODE-step function
+        are all specific to the wavelength it was characterized at, so
+        there's no such thing as safely changing it in place after
+        construction -- self.k would go stale, and so would every spline
+        built from self.neffs/self.cmats. This isn't a hypothetical
+        concern: the multi-wavelength pipeline already only ever constructs
+        a fresh Propagator per wavelength (see e.g.
+        examples/multi_wvl/pipeline.py), never mutates one's .wl.
+        """
+        return self._wl
+
+    @property
+    def k(self):
+        """Free-space wavenumber 2*pi/wl. Derived from self.wl (immutable),
+        so this can't go stale the way a value cached once in __init__
+        could if .wl were ever mutated.
+        """
+        return 2 * self.xp.pi / self._wl
+
     # =========================================================================
     # Main public functions
     # =========================================================================
@@ -367,7 +388,7 @@ class Propagator:
             nmodes     = orig_shape[-1]
             u0_flat    = u0.reshape(-1, nmodes) if len(orig_shape) > 1 else u0
 
-            k             = 2 * self.xp.pi / self.wl
+            k             = self.k
             int_neffs_zi  = self.get_int_neff(zi)
 
             def deriv(z, u_in):
@@ -1670,7 +1691,7 @@ class ChainPropagator(Propagator):
             self.z_breaks.append(p.zs[-1])
 
         p0 = propagators[0]
-        self.wl = p0.wl
+        self._wl = p0.wl
         self.wvg = p0.wvg
         self.Nmax = p0.Nmax
         self.skipped_modes = p0.skipped_modes

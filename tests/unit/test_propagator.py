@@ -33,6 +33,21 @@ class TestConstruction:
     def test_wavenumber(self, prop):
         assert prop.k == pytest.approx(2 * np.pi / 1.55)
 
+    def test_wl_is_read_only(self, prop):
+        # A Propagator's mode data, coupling matrices, and (on the jax
+        # backend) cached ODE-step function are all specific to the
+        # wavelength it was characterized at -- self.k, and anything built
+        # from it, would go stale if .wl could change after construction.
+        # The multi-wavelength pipeline already only ever constructs a
+        # fresh Propagator per wavelength (see e.g.
+        # examples/multi_wvl/pipeline.py), so this formalizes an invariant
+        # nothing relies on being able to break.
+        with pytest.raises(AttributeError):
+            prop.wl = 1.31
+
+    def test_k_is_derived_from_wl(self, prop):
+        assert prop.k == pytest.approx(2 * np.pi / prop.wl)
+
     def test_creates_output_folders(self, fiber, save_dir):
         Propagator(1.55, fiber, Nmax=4, save_dir=save_dir)
         for sub in ("eigenmodes", "eigenvalues", "cplcoeffs", "zvals",
@@ -308,3 +323,10 @@ class TestChainPropagator:
         chain = ChainPropagator([p1, p2])
         assert chain.get_prop(10.0) is p1
         assert chain.get_prop(200.0) is p2
+
+    def test_wl_is_read_only(self, fiber, save_dir):
+        p1 = Propagator(1.55, fiber, Nmax=3, save_dir=save_dir)
+        p1.zs = np.linspace(0, 100, 5)
+        chain = ChainPropagator([p1])
+        with pytest.raises(AttributeError):
+            chain.wl = 1.31
