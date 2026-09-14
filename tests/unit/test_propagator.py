@@ -170,6 +170,51 @@ class TestInterpolation:
         cor = loaded.WKB_cor(30.0)
         assert cor.shape == (3,)
 
+    def test_propagate_uses_correct_zi_not_stale_cache(self, loaded):
+        # On the jax backend, propagate()'s ODE step function is now built
+        # once and reused across calls (see _get_jax_step_fn), with zi/zf
+        # passed in as traced arguments instead of being closed over. Guard
+        # against the regression that refactor could introduce: a cached
+        # step function that silently keeps using the *first* zi it was
+        # built with, regardless of what it's actually called with.
+        u0 = [1.0, 0.0, 0.0]
+        _, _, uf_a = loaded.propagate(u0, 10.0, 60.0)
+        _, _, uf_b = loaded.propagate(u0, 20.0, 60.0)  # different zi, same zf
+        assert not np.allclose(uf_a, uf_b, atol=1e-6)
+
+        # and it must agree with a completely fresh (uncached) step function
+        loaded.make_interp_funcs()
+        _, _, uf_a_fresh = loaded.propagate(u0, 10.0, 60.0)
+        assert np.allclose(uf_a, uf_a_fresh, atol=1e-8)
+
+    def test_jax_step_fn_is_cached_across_calls(self, loaded):
+        u0 = [1.0, 0.0, 0.0]
+        loaded.propagate(u0, 10.0, 60.0)
+        if loaded.backend != "jax":
+            pytest.skip("jax-only: propagate() has no compiled step "
+                        "function to cache on the numpy backend")
+        cached_fn = loaded._jax_step_cache[1]
+
+        # same zi/zf: must reuse the compiled function, not rebuild it
+        loaded.propagate(u0, 10.0, 60.0)
+        assert loaded._jax_step_cache[1] is cached_fn
+
+        # different zi/zf, same interpolants: still reused -- this is the
+        # whole point (compute_transfer_matrix's per-mode loop, or repeated
+        # propagate() calls at different z spans, used to force a fresh
+        # jax.jit trace+compile every single time)
+        loaded.propagate(u0, 20.0, 70.0)
+        assert loaded._jax_step_cache[1] is cached_fn
+
+        # backpropagate() shares the same cached step function
+        loaded.backpropagate([0.0, 1.0, 0.0], 60.0, 10.0)
+        assert loaded._jax_step_cache[1] is cached_fn
+
+        # a real rebuild of the interpolants must invalidate the cache
+        loaded.make_interp_funcs()
+        loaded.propagate(u0, 10.0, 60.0)
+        assert loaded._jax_step_cache[1] is not cached_fn
+
 
 # --------------------------------------------------------------------------- #
 # z-invariant end-to-end (cheap)

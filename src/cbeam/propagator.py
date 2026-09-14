@@ -244,6 +244,80 @@ class Propagator:
     # alias
     prop_setup = characterize
 
+    def _get_jax_step_fn(self):
+        """Return the jitted ODE-step function shared by propagate() and
+        backpropagate() on the jax backend, building (and jax.jit-compiling)
+        it only once per characterization and reusing it after that.
+
+        Previously ``dz_dt``/``_run`` were rebuilt and re-``@jax.jit``-ted
+        from scratch inside propagate()/backpropagate() on *every* call,
+        closing over ``zi`` as a Python constant. Since jax.jit's cache is
+        keyed to the wrapped function object, a fresh closure each call
+        means a fresh, empty cache each call: every invocation pays full
+        trace+compile cost, even for repeat calls with identical shapes
+        (e.g. compute_transfer_matrix's per-mode loop, or ChainPropagator
+        stepping through segments). Building the step function once and
+        passing ``u0``/``zi``/``zf`` in as traced arguments (``zi`` via
+        diffrax's ``args``) instead of closing over them means the *same*
+        compiled executable is reused for any zi/zf/u0, as long as the
+        interpolants it depends on haven't changed.
+
+        The cache is invalidated by self._splines_version (bumped by
+        make_interp_funcs() whenever it rebuilds the jax splines) and by
+        self.WKB / self.wl, both of which are baked into the trace as
+        static Python values.
+        """
+        key = (getattr(self, "_splines_version", None), bool(self.WKB), self.wl)
+        cached = getattr(self, "_jax_step_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        import jax
+        import jax.numpy as jnp
+        import diffrax
+
+        neffs_spline   = self._prop_neffs_spline
+        int_neffs_func = self._prop_int_neffs_func
+        dif_neffs_func = self._prop_dif_neffs_func
+        M_spline       = self._prop_M_spline
+        wl             = self.wl
+        wkb_flag       = bool(self.WKB)
+
+        def dz_dt(z, u, zi):
+            phases    = (2 * jnp.pi / wl *
+                         (int_neffs_func(z) - int_neffs_func(zi))) % (2 * jnp.pi)
+            phase_mat = jnp.exp(1j * (phases[None, :] - phases[:, None]))
+            M_z       = M_spline(z)
+            neffs     = neffs_spline(z)
+            ddz       = -1. / neffs * jnp.einsum(
+                'ij,...j->...i', phase_mat * M_z, u * neffs)
+            if wkb_flag:
+                ddz += -0.5 * dif_neffs_func(z) / neffs * u
+            return ddz
+
+        @jax.jit
+        def _run(u0_val, zi_val, zf_val):
+            # diffrax integrates backward automatically when t0 > t1 and
+            # dt0 < 0; dz_dt itself doesn't care about direction, so the
+            # same compiled function serves propagate() and backpropagate().
+            sol = diffrax.diffeqsolve(
+                diffrax.ODETerm(dz_dt),
+                diffrax.Dopri5(),
+                t0=zi_val,
+                t1=zf_val,
+                dt0=(zf_val - zi_val) * 0.01,
+                y0=jnp.asarray(u0_val, dtype=jnp.complex128),
+                args=zi_val,
+                # SaveAt(t1=True) keeps only the final state → minimal memory
+                saveat=diffrax.SaveAt(t1=True),
+                stepsize_controller=diffrax.PIDController(rtol=1e-12, atol=1e-10),
+                max_steps=200_000,
+            )
+            return sol.ys, sol.ts
+
+        self._jax_step_cache = (key, _run)
+        return _run
+
     def propagate(self,u0,zi=None,zf=None):
         """ propagate a launch wavefront, expressed in the basis of initial eigenmodes, to z = zf 
         
@@ -277,48 +351,12 @@ class Propagator:
 
         # ========================= JAX CODEPATH ==============================
         if self.backend == "jax":
-            import jax
             import jax.numpy as jnp
-            import diffrax
-    
-            neffs_spline   = self._prop_neffs_spline
-            int_neffs_func = self._prop_int_neffs_func
-            dif_neffs_func = self._prop_dif_neffs_func
-            M_spline       = self._prop_M_spline
-            wl             = self.wl
-            wkb_flag       = bool(self.WKB)
 
-            def dz_dt(z, u, args=None):
-                phases    = (2 * jnp.pi / wl *
-                             (int_neffs_func(z) - int_neffs_func(zi))) % (2 * jnp.pi)
-                phase_mat = jnp.exp(1j * (phases[None, :] - phases[:, None]))
-                M_z       = M_spline(z)
-                neffs     = neffs_spline(z)
-                ddz       = -1. / neffs * jnp.einsum(
-                    'ij,...j->...i', phase_mat * M_z, u * neffs)
-                if wkb_flag:
-                    ddz += -0.5 * dif_neffs_func(z) / neffs * u
-                return ddz
-        
-            @jax.jit
-            def _run(u0_val):
-                sol = diffrax.diffeqsolve(
-                    diffrax.ODETerm(dz_dt),
-                    diffrax.Dopri5(),
-                    t0=zi,
-                    t1=zf,
-                    dt0=(zf - zi) * 0.01,
-                    y0=jnp.asarray(u0_val, dtype=jnp.complex128),
-                    # SaveAt(t1=True) keeps only the final state → minimal memory
-                    saveat=diffrax.SaveAt(t1=True),
-                    #saveat=diffrax.SaveAt(steps=True), # for fair comparison with numpy path
-                    stepsize_controller=diffrax.PIDController(rtol=1e-12, atol=1e-10),
-                    max_steps=200_000,
-                )
-                return sol.ys, sol.ts
-
-            u0_jnp         = jnp.asarray(u0, dtype=jnp.complex128)
-            us_grid, z_grid = _run(u0_jnp)
+            _run = self._get_jax_step_fn()
+            u0_jnp          = jnp.asarray(u0, dtype=jnp.complex128)
+            us_grid, z_grid = _run(u0_jnp, jnp.asarray(zi, dtype=jnp.float64),
+                                          jnp.asarray(zf, dtype=jnp.float64))
             uf = self.apply_phase(us_grid[-1], float(z_grid[-1]), zi)
             return z_grid, us_grid, uf
 
@@ -410,49 +448,15 @@ class Propagator:
 
         # ========================= JAX CODEPATH ==============================
         if self.backend == "jax":
-            import jax
             import jax.numpy as jnp
-            import diffrax
 
-            # Reuse exactly the same splines as the forward path.
-            neffs_spline   = self._prop_neffs_spline
-            int_neffs_func = self._prop_int_neffs_func
-            dif_neffs_func = self._prop_dif_neffs_func
-            M_spline       = self._prop_M_spline
-            wl             = self.wl
-            wkb_flag       = bool(self.WKB)
-
-            def dz_dt(z, u, args=None):
-                phases    = (2 * jnp.pi / wl *
-                             (int_neffs_func(z) - int_neffs_func(zi))) % (2 * jnp.pi)
-                phase_mat = jnp.exp(1j * (phases[None, :] - phases[:, None]))
-                M_z       = M_spline(z)
-                neffs     = neffs_spline(z)
-                ddz       = -1. / neffs * jnp.einsum(
-                    'ij,...j->...i', phase_mat * M_z, u * neffs)
-                if wkb_flag:
-                    ddz += -0.5 * dif_neffs_func(z) / neffs * u
-                return ddz
-
-            @jax.jit
-            def _run_backward(uf_val):
-                # diffrax integrates backward when t0 > t1 and dt0 < 0
-                sol = diffrax.diffeqsolve(
-                    diffrax.ODETerm(dz_dt),
-                    diffrax.Dopri5(),
-                    t0=zi,
-                    t1=zf,
-                    dt0=(zf - zi) * 0.01,   # negative, since zf < zi
-                    y0=jnp.asarray(uf_val, dtype=jnp.complex128),
-                    saveat=diffrax.SaveAt(t1=True),
-                    # saveat=diffrax.SaveAt(steps=True), # for fair comparison with numpy path
-                    stepsize_controller=diffrax.PIDController(rtol=1e-12, atol=1e-10),
-                    max_steps=200_000,
-                )
-                return sol.ys, sol.ts
-
+            # Reuse exactly the same cached step function as the forward path
+            # -- dz_dt doesn't care about direction, diffrax integrates
+            # backward automatically since zi > zf here (dt0 comes out < 0).
+            _run = self._get_jax_step_fn()
             uf_jnp          = jnp.asarray(uf, dtype=jnp.complex128)
-            us_grid, z_grid = _run_backward(uf_jnp)
+            us_grid, z_grid = _run(uf_jnp, jnp.asarray(zi, dtype=jnp.float64),
+                                          jnp.asarray(zf, dtype=jnp.float64))
             ui = self.apply_phase(us_grid[-1], float(z_grid[-1]), zi)
             return z_grid, us_grid, ui
 
@@ -1035,6 +1039,10 @@ class Propagator:
                     self.get_v = lambda z, _r=_csr, _i=_csi: _r(z) + 1j * _i(z)
 
             self._splines_ready = True
+            # Bumped so _get_jax_step_fn() knows to rebuild+rejit the cached
+            # propagation step: it closes over the spline objects above by
+            # reference, so a stale cache would keep using last time's data.
+            self._splines_version = getattr(self, "_splines_version", 0) + 1
 
         # =====================================================================
         # NUMPY BACKEND
