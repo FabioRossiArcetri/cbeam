@@ -1371,19 +1371,24 @@ class Propagator:
             (array): an Nmax x Nmax complex-valued transfer matrix.
         """
         N = self.Nmax
-        mat = self.xp.zeros((N, N), dtype=self.xp.complex128)
-        u0  = self.xp.zeros(N)
+        # Built functionally (one column at a time, stacked at the end)
+        # rather than through in-place item assignment: self.xp is jax.numpy
+        # on the jax backend, and jax arrays don't support `arr[idx] = value`.
+        cols = []
         for j in range(N):
             print("\rpropagating mode {0}".format(j),end='',flush=True)
             if j in self.skipped_modes:
+                cols.append(self.xp.zeros(N, dtype=self.xp.complex128))
                 continue
-            u0[:] = 0.
-            u0[j] = 1.
+            u0 = self.xp.eye(N)[j]
             zs,us,uf = self.propagate(u0,zi,zf)
             out = self.to_channel_basis(uf, z=zf) if channel_basis else uf
             M = len(out)
-            mat[:M,j] = out
-        return mat
+            if M < N:
+                out = self.xp.concatenate(
+                    [out, self.xp.zeros(N - M, dtype=out.dtype)])
+            cols.append(out)
+        return self.xp.stack(cols, axis=1)
 
     # =========================================================================
     # Mesh generation

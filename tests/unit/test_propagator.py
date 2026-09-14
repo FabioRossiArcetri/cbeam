@@ -194,6 +194,32 @@ class TestZInvariant:
         zs, us, uf = prop.propagate(u0, 0.0, 5000.0)
         assert np.sum(np.abs(uf) ** 2) == pytest.approx(1.0, rel=1e-6)
 
+    def test_compute_transfer_matrix_matches_propagate_per_mode(self, prop):
+        # compute_transfer_matrix() used to build its result with in-place
+        # item assignment (mat[:M, j] = out, u0[j] = 1.), which crashes on
+        # the jax backend since jax arrays are immutable. Regression test
+        # for both backends: it must run at all, and every column must
+        # equal what propagate() gives for that basis mode alone.
+        prop.characterize(save=False)
+        mat = prop.compute_transfer_matrix(channel_basis=False, zi=0.0, zf=5000.0)
+        assert mat.shape == (prop.Nmax, prop.Nmax)
+        for j in range(prop.Nmax):
+            u0 = [0.0] * prop.Nmax
+            u0[j] = 1.0
+            _, _, uf = prop.propagate(u0, 0.0, 5000.0)
+            assert np.allclose(mat[:, j], uf, atol=1e-10)
+        # z-invariant fiber: no mode coupling, so propagation is phase-only
+        # -> the matrix is diagonal with unit-modulus entries.
+        off_diag = mat - np.diag(np.diag(mat))
+        assert np.allclose(off_diag, 0, atol=1e-10)
+        assert np.allclose(np.abs(np.diag(mat)), 1.0, rtol=1e-6)
+
+    def test_compute_transfer_matrix_zeroes_skipped_modes(self, prop):
+        prop.characterize(save=False)
+        prop.skipped_modes = [1]
+        mat = prop.compute_transfer_matrix(channel_basis=False, zi=0.0, zf=5000.0)
+        assert np.allclose(mat[:, 1], 0.0)
+
     def test_make_field_and_back(self, prop):
         prop.characterize(save=False)
         field = prop.make_field([1.0, 0.0, 0.0, 0.0], z=0.0, apply_phase=False)
