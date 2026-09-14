@@ -95,7 +95,7 @@ def evaluate(point,field,tree):
         return xp.array(jl.FEval.evaluate(point[:,:2], field, tree))
     return xp.array(jl.FEval.evaluate(point, field, tree))
 
-def resample(field, mesh, newmesh):
+def resample(field,mesh,newmesh):
     """ resample a finite element field onto a new mesh
     
     ARGS: 
@@ -104,9 +104,9 @@ def resample(field, mesh, newmesh):
         newmesh: the new finite element mesh <field> should be sampled on.
     """
     tree = create_tree_from_mesh(mesh)
-    return evaluate(newmesh.points, field, tree)
+    return evaluate(newmesh.points,field,tree)
 
-def evaluate_grid(pointsx, pointsy, field, tree):
+def evaluate_grid(pointsx,pointsy,field,tree):
     """ evaluate a field defined over a finite element mesh on a cartesian grid.
     
     ARGS:
@@ -126,11 +126,11 @@ def evaluate_grid(pointsx, pointsy, field, tree):
 def update_tree(tree, rescale_factor):
     jl.FEval.update_tritree(tree, rescale_factor)
 
-def evaluate_func(field, tree):
+def evaluate_func(field,tree):
     """ return a (julia) function of the point [x,y] corresponding to a given FE field """
-    return jl.FEval.evaluate_func(field, tree)
+    return jl.FEval.evaluate_func(field,tree)
 
-def transverse_gradient(field, tris, points):
+def transverse_gradient(field,tris,points):
     """ compute the gradient of a real-valued finite element field with respect to x,y
     
     ARGS:
