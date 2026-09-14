@@ -95,31 +95,34 @@ class Propagator:
 
     ## high level parameters
 
-    # -- propagation params --------------------------------------------------
+    # propagation params
+    
     #: str: solving method for scipy's solve_ivp, default "RK45"
     solver = "RK45"
-    #: bool: whether to include the WKB-like correction term
-    WKB    = True
+    #: bool: whether to add the WKB-like correction to the coupled mode equations (usually negligible)
+    WKB = True
 
-    # -- z-stepping params ---------------------------------------------------
+    # z-stepping params
+
     #: float: controls adaptive stepping. higher = more steps (more accurate).
-    #: this is base 10 logarithmic. if you want to reduce tolerance by 10x, set to 1, etc.
-    z_acc       = 0.
+    #: this is base 10 logarithmic. if you want to reduce tolerance by 10x, set to 1, etc. 
+    z_acc = 0.
     #: float or None: set to a numeric value to use a fixed zstep
-    fixed_zstep = None
+    fixed_zstep = None     
     #: float: minimum z step value when computing modes.
-    min_zstep      = 0.625
+    min_zstep = 0.625
     #: float: minimum z step value when computing effective indices
-    min_zstep_neff = 10.
+    min_zstep_neff = 10. 
     #: float: maximum z step value when computing modes or effective indices
-    max_zstep      = float('inf')   # plain Python float — no backend dependency
+    max_zstep = float('inf')   # plain Python float — no backend dependency
     #: float: starting z step
-    init_zstep     = 10.
+    init_zstep = 10.
 
-    # -- misc ----------------------------------------------------------------
-    #: the minimum difference in effective index two modes can have before they are considered degenerate
-    degen_crit          = 1e-5
-    degen_groups        = []
+    # misc params
+    degen_crit = 1e-5         # the minimum difference in effective index two modes can have before they are considered degenerate    
+    
+    degen_groups = []
+
     #: list: used to zero certain modes during calculations. useful if there's a cladding mode
     #: which is behaving erratically and slowing down the adaptive stepping.
     skipped_modes = []
@@ -1274,9 +1277,8 @@ class Propagator:
         assert self.zs is not None, \
             "no propagation data detected — run characterize() or load() first"
         zinv = len(self.zs) == 1
-        assert z is not None or zinv, \
-            "z can only be left as None if the waveguide is z-invariant"
-        z  = 0 if z is None and zinv else z
+        assert z is not None or zinv, "z can only be left as None if the waveguide is z-invariant"
+        z = 0 if z is None and zinv else z
         zi = self.zs[0] if self.zs is not None else 0.
         u  = self.xp.array(mode_amps, dtype=self.xp.complex128)
         basis = self.get_v(z)
