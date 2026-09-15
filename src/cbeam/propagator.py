@@ -1723,8 +1723,19 @@ class ChainPropagator(Propagator):
             if first:
                 all_zs.append(zs); all_us.append(us)
                 first = False
-            else:
+            elif len(zs) > 1:
+                # Multi-point trajectory (the numpy backend returns the full
+                # adaptive-step trajectory): its first point duplicates the
+                # previous segment's last point, so drop it.
                 all_zs.append(zs[1:]); all_us.append(us[1:])
+            else:
+                # Single-point trajectory: the jax backend's propagate()
+                # returns only the ODE endpoint (diffrax SaveAt(t1=True)),
+                # never the segment's start -- this point IS the new
+                # endpoint, not a duplicate of the boundary. Keeping it
+                # whole is required, or every segment after the first
+                # silently vanishes from the returned trajectory entirely.
+                all_zs.append(zs); all_us.append(us)
             z = float(zs[-1])
 
         zs_full = xp.concatenate(all_zs)

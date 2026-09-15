@@ -79,6 +79,11 @@ def test_chain_propagator_end_to_end(save_dir, golden):
     zs, us, uf = chain.propagate(u0)
     chain.plot_mode_powers(zs, us)
 
+    # the trajectory must reach the true end of the second segment, not get
+    # stuck reporting the front/back junction (half) as the last point --
+    # regression check for a bug where the second segment's own trajectory
+    # was silently dropped entirely on the jax backend.
+    assert float(zs[-1]) == pytest.approx(pl19.z_ex)
     assert us.shape[1] == 20
     # mode 18 is skipped/zeroed throughout
     assert np.allclose(us[:, 18], 0.0)

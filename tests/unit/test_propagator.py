@@ -353,3 +353,43 @@ class TestChainPropagator:
         chain = ChainPropagator([p1])
         with pytest.raises(AttributeError):
             chain.wl = 1.31
+
+    def test_propagate_full_trajectory_across_segments(self, fiber, save_dir):
+        # Regression test: propagate() assumed every segment's own
+        # propagate() returns a multi-point trajectory whose first point
+        # duplicates the previous segment's last point, dropping it via
+        # zs[1:]/us[1:]. On the jax backend, each segment's propagate()
+        # returns only the ODE endpoint (diffrax SaveAt(t1=True)) -- a
+        # single point that is *not* a duplicate -- so every segment after
+        # the first silently vanished from the returned trajectory: zs/us
+        # collapsed to the front/back junction instead of spanning the
+        # whole chain, even though the physics (the final state) was fine.
+        def make_segment(zlo, zhi, seed):
+            p = Propagator(1.55, fiber, Nmax=3, save_dir=save_dir)
+            zs = np.linspace(zlo, zhi, 6)
+            rng = np.random.default_rng(seed)
+            p.neffs = 1.45 - 1e-4 * zs[:, None] - 1e-4 * np.arange(3)[None, :]
+            C = rng.normal(size=(3, 3)) * 1e-4
+            C = C - C.T
+            p.cmats = zs[:, None, None] / zs[-1] * C[None, :, :]
+            p.vs = np.zeros((len(zs), 3, 8))
+            p.zs = zs
+            p.make_interp_funcs()
+            return p
+
+        p1 = make_segment(0, 50, seed=0)
+        p2 = make_segment(50, 100, seed=1)
+        chain = ChainPropagator([p1, p2])
+        u0 = np.zeros(3)
+        u0[0] = 1.0
+        zs, us, uf = chain.propagate(u0)
+
+        # The true final z must be reached -- the bug got stuck reporting
+        # the 50.0 front/back junction as the last point, since segment 2
+        # contributed nothing. (On the jax backend propagate() reports only
+        # ODE endpoints, never the start, so zs[0] == 50.0 here is expected
+        # and not part of this regression -- only zs[-1] getting stuck at
+        # the junction was the bug.)
+        assert float(zs[-1]) == pytest.approx(100.0)
+        assert len(zs) >= 2  # every segment contributed at least one point
+        assert np.allclose(np.abs(us[-1]), np.abs(uf), atol=1e-8)
