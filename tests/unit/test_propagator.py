@@ -225,6 +225,26 @@ class TestInterpolation:
         _, _, uf_a_fresh = loaded.propagate(u0, 10.0, 60.0)
         assert np.allclose(uf_a, uf_a_fresh, atol=1e-8)
 
+    def test_propagate_n_save_returns_dense_trajectory(self, loaded):
+        # On the jax backend, propagate() normally keeps only the ODE
+        # endpoint (SaveAt(t1=True)) to avoid buffering a per-step
+        # trajectory -- fine for the physics, but useless for plotting the
+        # trajectory itself (see ChainPropagator usage in
+        # examples/original_example.ipynb, where this showed up as a
+        # visibly flat/near-empty mode-power plot on jax). n_save opts back
+        # into a dense, fixed-size trajectory on demand, on both backends.
+        u0 = [1.0, 0.0, 0.0]
+        zs, us, uf = loaded.propagate(u0, 10.0, 60.0, n_save=9)
+        zs = np.asarray(zs)
+        assert zs.shape[0] == 9
+        assert np.asarray(us).shape[0] == 9
+        assert float(zs[0]) == pytest.approx(10.0)
+        assert float(zs[-1]) == pytest.approx(60.0)
+
+        # physics must match the default (endpoint-only) call
+        _, _, uf_default = loaded.propagate(u0, 10.0, 60.0)
+        assert np.allclose(uf, uf_default, atol=1e-8)
+
     def test_jax_step_fn_is_cached_across_calls(self, loaded):
         u0 = [1.0, 0.0, 0.0]
         loaded.propagate(u0, 10.0, 60.0)
@@ -392,4 +412,34 @@ class TestChainPropagator:
         # the junction was the bug.)
         assert float(zs[-1]) == pytest.approx(100.0)
         assert len(zs) >= 2  # every segment contributed at least one point
+        assert np.allclose(np.abs(us[-1]), np.abs(uf), atol=1e-8)
+
+    def test_propagate_n_save_forwarded_per_segment(self, fiber, save_dir):
+        # n_save is forwarded to each segment's own propagate() call, so a
+        # 2-segment chain with n_save=5 should return a visibly dense
+        # trajectory (not just the 2 junction/endpoint points jax gives by
+        # default), reaching the true end of the chain either way.
+        def make_segment(zlo, zhi, seed):
+            p = Propagator(1.55, fiber, Nmax=3, save_dir=save_dir)
+            zs = np.linspace(zlo, zhi, 6)
+            rng = np.random.default_rng(seed)
+            p.neffs = 1.45 - 1e-4 * zs[:, None] - 1e-4 * np.arange(3)[None, :]
+            C = rng.normal(size=(3, 3)) * 1e-4
+            C = C - C.T
+            p.cmats = zs[:, None, None] / zs[-1] * C[None, :, :]
+            p.vs = np.zeros((len(zs), 3, 8))
+            p.zs = zs
+            p.make_interp_funcs()
+            return p
+
+        p1 = make_segment(0, 50, seed=0)
+        p2 = make_segment(50, 100, seed=1)
+        chain = ChainPropagator([p1, p2])
+        u0 = np.zeros(3)
+        u0[0] = 1.0
+        zs, us, uf = chain.propagate(u0, n_save=5)
+
+        assert float(zs[0]) == pytest.approx(0.0)
+        assert float(zs[-1]) == pytest.approx(100.0)
+        assert len(zs) >= 9  # 5 + 5, minus the shared junction point
         assert np.allclose(np.abs(us[-1]), np.abs(uf), atol=1e-8)

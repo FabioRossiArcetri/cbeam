@@ -97,3 +97,12 @@ def test_chain_propagator_end_to_end(save_dir, golden):
     # (it moves by ~5e-2 between eigensolver bases).  The physical channel-power
     # spectrum is stable, so only that is pinned.
     golden.check("channel_out_power", np.abs(out) ** 2, sort=True, atol=1e-3)
+
+    # n_save asks for a dense, fixed-size trajectory instead of just
+    # endpoints -- needed on the jax backend for plotting (see
+    # Propagator.propagate()'s docstring); must reach the same final state
+    # as the default endpoint-only call, on a real (not hand-built) chain.
+    zs_dense, us_dense, uf_dense = chain.propagate(u0, n_save=25)
+    assert float(zs_dense[0]) == pytest.approx(0.0)
+    assert float(zs_dense[-1]) == pytest.approx(pl19.z_ex)
+    assert np.allclose(uf_dense, uf, atol=1e-6)

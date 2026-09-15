@@ -235,6 +235,13 @@ class Propagator:
                 - neffs: array of effective indices computed on zs; 0th axis is "z axis"
                 - vs: eigenmodes computed on zs; 0th axis is "z axis"
                 - cmats: coupling coefficients computed on zs; 0th axis is "z axis"
+
+        NOTE: two independent calls to characterize() on the same waveguide
+        (even the same process, same backend, run twice) can return mode
+        bases (vs) that differ by an arbitrary orthogonal rotation within
+        any (quasi-)degenerate group of modes -- see the note on
+        compute_modes() below. This is not specific to this fork's jax
+        backend; it is a property of the underlying sparse eigensolver.
         """
         
         # z-invariant waveguide shortcut
@@ -265,7 +272,7 @@ class Propagator:
     # alias
     prop_setup = characterize
 
-    def _get_jax_step_fn(self):
+    def _get_jax_step_fn(self, n_save=None):
         """Return the jitted ODE-step function shared by propagate() and
         backpropagate() on the jax backend, building (and jax.jit-compiling)
         it only once per characterization and reusing it after that.
@@ -284,11 +291,20 @@ class Propagator:
         interpolants it depends on haven't changed.
 
         The cache is invalidated by self._splines_version (bumped by
-        make_interp_funcs() whenever it rebuilds the jax splines) and by
-        self.WKB / self.wl, both of which are baked into the trace as
-        static Python values.
+        make_interp_funcs() whenever it rebuilds the jax splines), by
+        self.WKB / self.wl, and by n_save, all of which are baked into the
+        trace as static Python values.
+
+        ARGS:
+            n_save: if None (default), the returned function keeps only the
+                ODE endpoint (``SaveAt(t1=True)``) -- minimal memory, the
+                normal fast path. If an int, it instead saves that many
+                evenly spaced points spanning [zi,zf] inclusive, for callers
+                (e.g. plotting) that need a visible trajectory rather than
+                just the endpoint. n_save must be a plain Python int (not
+                traced) since it fixes the shape of the jitted output.
         """
-        key = (getattr(self, "_splines_version", None), bool(self.WKB), self.wl)
+        key = (getattr(self, "_splines_version", None), bool(self.WKB), self.wl, n_save)
         cached = getattr(self, "_jax_step_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -321,6 +337,10 @@ class Propagator:
             # diffrax integrates backward automatically when t0 > t1 and
             # dt0 < 0; dz_dt itself doesn't care about direction, so the
             # same compiled function serves propagate() and backpropagate().
+            saveat = (diffrax.SaveAt(t1=True) if n_save is None else
+                      # zi_val/zf_val are traced; n_save is the static point
+                      # count, so this keeps a fixed output shape under jit.
+                      diffrax.SaveAt(ts=jnp.linspace(zi_val, zf_val, n_save)))
             sol = diffrax.diffeqsolve(
                 diffrax.ODETerm(dz_dt),
                 diffrax.Dopri5(),
@@ -330,7 +350,7 @@ class Propagator:
                 y0=jnp.asarray(u0_val, dtype=jnp.complex128),
                 args=zi_val,
                 # SaveAt(t1=True) keeps only the final state → minimal memory
-                saveat=diffrax.SaveAt(t1=True),
+                saveat=saveat,
                 stepsize_controller=diffrax.PIDController(rtol=1e-12, atol=1e-10),
                 max_steps=200_000,
             )
@@ -339,13 +359,22 @@ class Propagator:
         self._jax_step_cache = (key, _run)
         return _run
 
-    def propagate(self,u0,zi=None,zf=None):
+    def propagate(self,u0,zi=None,zf=None,n_save=None):
         """ propagate a launch wavefront, expressed in the basis of initial eigenmodes, to z = zf 
         
         ARGS:
             u0: the launch field, expressed as mode amplitudes of the initial eigenmode basis.
             zi: the initial z coordinate corresponding to u0. if None, use the initial z value used in characterize().
             zf: the final z coordinate to propagate through to. if None, use the final z value used in characterize().
+            n_save (opt.): on the jax backend, save this many evenly spaced z
+                values spanning [zi,zf] (inclusive) instead of only the
+                endpoint -- useful when the trajectory itself will be
+                plotted or inspected, at the cost of the memory/compile
+                savings SaveAt(t1=True) normally gives. Must be a plain int,
+                not a traced value. On the numpy backend this is forwarded
+                to solve_ivp's `t_eval`, so both backends can be asked for
+                the same fixed-size z grid; leave it None (default) to keep
+                each backend's normal behavior.
 
         RETURNS:
             (tuple): a tuple containing:
@@ -355,7 +384,8 @@ class Propagator:
 
         On the jax backend, the ODE solve keeps only the endpoint (diffrax
         ``SaveAt(t1=True)``, to avoid buffering a per-step trajectory); zs and u
-        each hold a single z value there instead of the full adaptive-step grid.
+        each hold a single z value there instead of the full adaptive-step grid,
+        unless n_save is given.
         """
         assert self.zs is not None, \
             "no propagation data detected — run characterize() or load() first"
@@ -374,7 +404,7 @@ class Propagator:
         if self.backend == "jax":
             import jax.numpy as jnp
 
-            _run = self._get_jax_step_fn()
+            _run = self._get_jax_step_fn(n_save)
             u0_jnp          = jnp.asarray(u0, dtype=jnp.complex128)
             us_grid, z_grid = _run(u0_jnp, jnp.asarray(zi, dtype=jnp.float64),
                                           jnp.asarray(zf, dtype=jnp.float64))
@@ -412,9 +442,10 @@ class Propagator:
                     return ddz
 
             y0_input = u0_flat.flatten() if len(orig_shape) > 1 else u0_flat
+            t_eval = None if n_save is None else np.linspace(zi, zf, n_save)
             sol = solve_ivp(deriv, (zi, zf), y0_input,
-                            method=self.solver, rtol=1e-12, atol=1e-10, 
-                            first_step=abs(zf-zi)*0.01, ) # removing t_eval=[zf] means to compute and return all internal steps
+                            method=self.solver, rtol=1e-12, atol=1e-10,
+                            first_step=abs(zf-zi)*0.01, t_eval=t_eval, ) # removing t_eval=[zf] means to compute and return all internal steps
 
             num_steps = len(sol.t)
             if len(orig_shape) > 1:
@@ -645,6 +676,31 @@ class Propagator:
             zs: array of z coordinates
             neffs: array of effective indices computed on zs
             vs:modes
+
+        NOTE on mode-basis reproducibility: at each z, the underlying
+        sparse eigensolver (``scipy.sparse.linalg.eigsh``, called from
+        ``wavesolve.solve_waveguide`` with no fixed starting vector) is
+        free to return any overall sign for each eigenvector, and for a
+        (quasi-)degenerate group of modes, any orthogonal rotation within
+        that group -- the eigenvalue problem itself doesn't prefer one
+        choice over another. track_modes()/correct_degeneracy()/
+        make_sign_consistent() keep that gauge *continuous* along z within
+        one characterize() run, but the starting gauge at z=zi is whatever
+        the first solve happens to return, which is not fixed across runs.
+        Two independent characterizations of the same waveguide can
+        therefore end up with mode bases that differ by such a rotation --
+        most visibly for heavily degenerate groups (e.g. a photonic
+        lantern's near-degenerate supermode set) -- even though every
+        gauge-invariant physical quantity (mode powers, the channel-basis
+        transfer matrix) comes out the same. See
+        tests/integration/test_pl19.py for a concrete example, and
+        examples/original_example.ipynb for a case where this shows up as
+        a mode-basis field plot that looks different between two
+        independently-recomputed characterizations -- including one run
+        under each cbeam backend, which is easy to mistake for a
+        numpy-vs-jax numerical bug but isn't one: propagate()'s own
+        numerics are backend-identical given the *same* characterization
+        (see tests/unit/test_propagator.py's TestInterpolation tests).
         """
         zi = 0 if zi is None else zi
         hit_min_zstep = False
@@ -1697,7 +1753,11 @@ class ChainPropagator(Propagator):
         idx = max(0,bisect_left(self.z_breaks,z)-1)
         return self.propagators[min(idx, len(self.propagators) - 1)]
 
-    def propagate(self,u0,zi=None,zf=None):
+    def propagate(self,u0,zi=None,zf=None,n_save=None):
+        """See Propagator.propagate(). n_save, if given, is forwarded to
+        each segment's own propagate() call, so it applies per segment
+        (e.g. n_save=50 on a 2-segment chain saves up to 100 points total,
+        not 50 spread across the whole chain)."""
         if zi is None:
             zi = self.propagators[0].zs[0]
         if zf is None:
@@ -1716,7 +1776,7 @@ class ChainPropagator(Propagator):
             if segment_end - z < 1e-10:
                 z = segment_end
                 continue
-            zs, us, u = p.propagate(u, z, segment_end)
+            zs, us, u = p.propagate(u, z, segment_end, n_save=n_save)
             if float(zs[-1]) <= z:
                 raise RuntimeError(
                     f"Propagate did not advance: current z {z} zs[-1] {zs[-1]}")
