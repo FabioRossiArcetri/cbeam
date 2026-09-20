@@ -16,7 +16,7 @@ def example_multiwavelength_propagation():
     import specula
     specula.init(0)
     from specula.data_objects.ifunc import IFunc
-    from batch_propagation_pipeline import get_simulation_parameters, create_random_aberration_configs
+    from batch_pipeline.config import get_simulation_parameters, create_random_aberration_configs
     from spectral.simulate import SpectralImageSimulator
     from spectral.extract import SpectralExtractor
 

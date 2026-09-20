@@ -283,22 +283,21 @@ def plot_detector_stage_for_field(
 ):
     """
     Run one field's spectra through SpectralImageSimulator /
-    SpectralExtractor (from spectral_extraction_module.py) and plot the
+    SpectralExtractor (from the ``spectral`` package) and plot the
     simulated detector image alongside the extracted spectra -- the same
-    two visualize_* calls used in spectral_extraction_module's own
-    example, wrapped so you can call it directly on multi-wavelength
-    pipeline output without re-deriving spectra_field0 / spectral_cfg
-    each time.
+    two visualize_* calls used in ``spectral.run``'s own example, wrapped
+    so you can call it directly on multi-wavelength pipeline output
+    without re-deriving spectra_field0 / spectral_cfg each time.
 
-    ``spectral_extraction_module`` and ``multi_wvl_pipeline`` are imported
-    inside the function on purpose: every *other* function in this module
-    needs only numpy + matplotlib and works on saved arrays, so importing
-    the (cbeam / juliacall / specula) stack is deferred to this one call.
+    ``multi_wvl_pipeline`` is imported inside the function on purpose:
+    every *other* function in this module needs only numpy + matplotlib and
+    works on saved arrays, so importing the (cbeam / juliacall / specula)
+    stack is deferred to this one call.  The ``spectral`` imports are light
+    (numpy/scipy/matplotlib) and sit here just to keep them by their use.
     """
-    from spectral_extraction_module import (
-        SpectralImageSimulator, SpectralExtractor,
-        visualize_spectral_image, visualize_extracted_spectra,
-    )
+    from spectral.simulate import SpectralImageSimulator
+    from spectral.extract import SpectralExtractor
+    from spectral.plots import visualize_spectral_image, visualize_extracted_spectra
     from multi_wvl_pipeline import (
         spectra_for_field, build_spectral_config_from_wavelength_grid,
     )
