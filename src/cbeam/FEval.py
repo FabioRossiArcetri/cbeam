@@ -33,7 +33,10 @@ def _host(a, dtype=None):
 # ===== ADD THIS: Load the FEval Julia module =====
 _cbeam_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _feval_jl = os.path.join(_cbeam_root, "cbeam", "FEval", "src", "FEval.jl")
-jl.seval(f'include("{_feval_jl}")')
+# raw"..." so the path is not run through Julia's string-escape rules: on
+# Windows os.path.join yields backslashes and e.g. "...\Users\..." fails to
+# parse as an invalid \U unicode escape.
+jl.seval(f'include(raw"{_feval_jl}")')
 # ================================================
 
 
