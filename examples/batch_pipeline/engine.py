@@ -108,11 +108,17 @@ def build_and_characterize_lantern(p, reuse_cache=False):
 
 
 def get_waveguide_properties(prop12, mesh_z=0):
-    """Extract waveguide modal properties at a given z position."""
+    """Extract waveguide modal properties at a given z position.
+
+    The returned mesh is the physical cross-section at ``mesh_z``: a
+    propagator's own ``.mesh`` is the z=0 reference mesh, which for a taper
+    differs from the real one by the local scale factor (``taper_factor`` at
+    the far end of a PhotonicLantern).
+    """
     from wavesolve.fe_solver import construct_B  # only used here
 
     p_segment  = prop12.get_prop(mesh_z)
-    mesh_obj   = p_segment.mesh
+    mesh_obj   = p_segment.make_mesh_at_z(mesh_z)
     p_segment.wvg.assign_IOR()          # ensure wvg.IOR_dict is populated
     modes      = p_segment.vs
 
@@ -172,11 +178,13 @@ class ModalProjector:
             carried here -- it is returned separately as
             ``coupling_efficiency``.
         coupling_efficiency : array, shape (n_fields,)
-            L2 norm of each projected vector *before* normalisation.
-            ~1.0 means nearly all pupil power coupled into the tracked
-            modes; << 1.0 flags misalignment or a pixel-scale problem.
-            Retain this if you need output power spectra to be comparable
-            across wavelengths -- the normalised ``u0_batch`` alone cannot be.
+            L2 norm of each projected vector *before* normalisation, in the
+            field's own units.  Divided by the incident field's total
+            focal-plane amplitude (``IncidentFieldGenerator.focal_plane_norm``,
+            as ``BatchPropagationPipeline`` does) it becomes the fraction of
+            amplitude that coupled into the tracked modes.  Retain it if you
+            need output power spectra to be comparable across wavelengths --
+            the normalised ``u0_batch`` alone cannot be.
         """
         u0_batch = E_batch @ self.projection_matrix.T
         coupling_efficiency = self.xp.linalg.norm(u0_batch, axis=1)
@@ -220,6 +228,16 @@ class IncidentFieldGenerator:
         N = self.grid_size
         pad_width = (N * self.p["pad_factor"] - N) // 2
         return pad_width, N + 2 * pad_width
+
+    @property
+    def focal_plane_norm(self):
+        """Square root of the total focal-plane power of any pupil field
+        (unit amplitude on every mask pixel), in the same um^2 units as the
+        modal overlaps: by Parseval, sum|fft2|^2 = padded_size^2 *
+        sum|pupil|^2, and each focal-plane pixel is pixel_scale_um^2."""
+        _, padded_size = self._pad_geometry()
+        pixel_scale = self.p.get("pixel_scale_um", 1.0)
+        return padded_size * np.sqrt(np.count_nonzero(self.mask_np)) * pixel_scale
 
     def precompute_interpolation_weights(self, mesh_points):
         """Bilinear-interpolation weights mapping the padded FFT grid onto the
@@ -529,9 +547,10 @@ class BatchPropagationPipeline:
 
         Returns ``(u0_chunk, eff_chunk)`` as plain numpy arrays of shape
         ``(chunk_size, n_modes)`` and ``(chunk_size,)`` respectively.
-        ``eff_chunk`` is the L2 norm of each projected vector *before*
-        normalisation -- i.e. the input coupling efficiency (amplitude, not
-        power) for that field; ``u0_chunk`` itself is unit-norm.
+        ``eff_chunk`` is the input coupling efficiency (amplitude, not power)
+        for each field: the L2 norm of its projected vector *before*
+        normalisation, divided by the field's total focal-plane amplitude;
+        ``u0_chunk`` itself is unit-norm.
         All intermediate arrays are local to this call and are released
         when it returns.
         """
@@ -542,7 +561,7 @@ class BatchPropagationPipeline:
             E_lantern = fg.apply_ef_to_lantern(Ef_input)
         Ef_focal_mesh   = fg.resample_to_mesh(E_lantern)
         u0_chunk, eff = proj.project_batch(Ef_focal_mesh)
-        return np.asarray(u0_chunk), np.asarray(eff)
+        return np.asarray(u0_chunk), np.asarray(eff) / fg.focal_plane_norm
 
     # ------------------------------------------------------------------
     def generate_batch_modal_coefficients(self, aberration_coeff_batch,
@@ -589,10 +608,9 @@ class BatchPropagationPipeline:
             Normalised (unit-L2-norm) modal coefficients, always a plain
             numpy array.
         eff_batch : np.ndarray, shape (n_configs,), float64
-            Only returned when ``return_coupling_efficiency=True``.  L2 norm
-            of each projected vector *before* normalisation -- i.e. the
-            fraction of pupil-field amplitude that coupled into the tracked
-            input modes.  ``u0_batch`` alone discards this, so any power
+            Only returned when ``return_coupling_efficiency=True``.  The
+            fraction of focal-plane field amplitude that coupled into the
+            tracked input modes (0..1; ``eff_batch**2`` is the power fraction).  ``u0_batch`` alone discards this, so any power
             spectrum that must stay comparable across fields or wavelengths
             has to be scaled by ``eff_batch**2`` (power) / ``eff_batch``
             (amplitude).

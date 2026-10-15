@@ -28,7 +28,12 @@ def diagnose_input_psf(pipeline):
     mask = fg_np.mask_np
     mask_center_y = np.mean(np.where(mask > 0)[0])
     mask_center_x = np.mean(np.where(mask > 0)[1])
-    expected_center = (mask.shape[0] - 1) / 2.0  # Correct for indexing from 0
+    # apply_ef_to_lantern's ifftshift puts pupil pixel N//2 on the optical
+    # axis, so that is the centre the mask has to sit on.
+    expected_center = mask.shape[0] // 2
+    # center_ifunc_mask moves the mask by whole pixels, so a sub-pixel
+    # residual is expected; only a residual of a pixel or more is flagged.
+    mask_tol_px = 1.0
     
     print(f"\n[MASK CENTERING CHECK]")
     print(f"  Mask shape: {mask.shape}")
@@ -36,8 +41,8 @@ def diagnose_input_psf(pipeline):
     print(f"  Expected center: ({expected_center:.2f}, {expected_center:.2f})")
     print(f"  Offset: ({mask_center_y - expected_center:.3f}, {mask_center_x - expected_center:.3f}) pixels")
     
-    if abs(mask_center_y - expected_center) > 0.1 or abs(mask_center_x - expected_center) > 0.1:
-        print("  ⚠️  WARNING: Mask is off-center! This will cause PSF misalignment.")
+    if abs(mask_center_y - expected_center) >= mask_tol_px or abs(mask_center_x - expected_center) >= mask_tol_px:
+        print("  ⚠️  WARNING: Mask is off-center by a pixel or more! This will cause PSF misalignment.")
         print("  Recommendation: re-center it with batch_pipeline.center_ifunc_mask(ifunc) before building the pipeline.")
 
     # 3. Extract field at key stages
@@ -85,7 +90,8 @@ def diagnose_input_psf(pipeline):
     mesh_pts = pipeline.wvg_props_input['mesh'].points
     x_min, x_max = mesh_pts[:, 0].min(), mesh_pts[:, 0].max()
     y_min, y_max = mesh_pts[:, 1].min(), mesh_pts[:, 1].max()
-    core_pts = np.array(pipeline.wvg_props_input['points'])
+    # lantern cores at the input end (z=0, where the taper scale is 1)
+    core_pts = np.asarray(pipeline.p["output_positions"], dtype=float)
 
     grid_x, grid_y = np.meshgrid(np.linspace(x_min, x_max, 400),
                                  np.linspace(y_min, y_max, 400))
@@ -108,20 +114,27 @@ def diagnose_input_psf(pipeline):
         print(f"  ⚠️  WARNING: PSF peak is > 2 μm from nearest core")
         print(f"  This suggests a scaling or centering issue in mesh interpolation.")
 
-    # 7. Power interception
-    total_power = intensity_mesh.sum()
-    core_mask = np.zeros_like(intensity_mesh, dtype=bool)
-    for cx, cy in core_pts:
-        dist = np.sqrt((mesh_pts[:, 0] - cx)**2 + (mesh_pts[:, 1] - cy)**2)
-        core_mask = core_mask | (dist < 2.5)
-    power_in_cores = intensity_mesh[core_mask].sum()
-    frac_in_cores = power_in_cores / total_power if total_power > 0 else 0
-    
+    # 7. Power interception: power on the mesh as the FE quadratic form
+    # E^H B E (a plain sum over nodes would weight them by mesh density),
+    # and the share of it inside the multimode cladding at the input end.
+    B = pipeline.wvg_props_input['B']
+    rclad = pipeline.p["rclad"]
+    inside = np.hypot(mesh_pts[:, 0], mesh_pts[:, 1]) < rclad
+    E_in = np.where(inside, Ef_focal_mesh, 0)
+    total_power = np.real(np.vdot(Ef_focal_mesh, B @ Ef_focal_mesh))
+    power_in_clad = np.real(np.vdot(E_in, B @ E_in))
+    frac_in_clad = power_in_clad / total_power if total_power > 0 else 0
+
+    # fraction of the focal-plane power that couples into the tracked modes
+    _, eff = pipeline._modal_proj_np.project_batch(Ef_focal_mesh[None, :])
+    coupled_power = float(np.asarray(eff)[0] / fg_np.focal_plane_norm) ** 2
+
     print(f"\n[COUPLING EFFICIENCY CHECK]")
-    print(f"  Power in cores (r=2.5 μm): {frac_in_cores:.1%}")
-    
-    if frac_in_cores < 0.5:
-        print(f"  ⚠️  WARNING: < 50% coupling efficiency")
+    print(f"  Power inside the cladding (r < {rclad} μm): {frac_in_clad:.1%} of the power on the mesh")
+    print(f"  Power coupled into the tracked modes: {coupled_power:.1%} of the focal-plane power")
+
+    if frac_in_clad < 0.5:
+        print(f"  ⚠️  WARNING: < 50% of the PSF power falls inside the cladding")
         print(f"  Check beam size, alignment, and numerical aperture matching.")
 
     # 8. Generate plots
@@ -213,14 +226,14 @@ def diagnose_input_psf(pipeline):
     print("DIAGNOSTIC SUMMARY")
     print("="*60)
     issues = []
-    if abs(mask_center_y - expected_center) > 0.1 or abs(mask_center_x - expected_center) > 0.1:
+    if abs(mask_center_y - expected_center) >= mask_tol_px or abs(mask_center_x - expected_center) >= mask_tol_px:
         issues.append("⚠️  Mask is off-center")
     if abs(offset_px[0]) > 0.5 or abs(offset_px[1]) > 0.5:
         issues.append("⚠️  FFT PSF peak is off-center")
     if min_dist > 2.0:
         issues.append("⚠️  Mesh PSF far from cores")
-    if frac_in_cores < 0.5:
-        issues.append("⚠️  Low coupling efficiency")
+    if frac_in_clad < 0.5:
+        issues.append("⚠️  Low PSF power inside the cladding")
     
     if issues:
         print("Issues found:")
