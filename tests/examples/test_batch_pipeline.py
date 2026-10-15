@@ -154,6 +154,54 @@ def test_field_generation_numpy_vs_jax(backend):
 
 
 # --------------------------------------------------------------------------- #
+# configs, core matching, signal extraction
+# --------------------------------------------------------------------------- #
+def test_random_configs_rng():
+    a, _ = bp.create_random_aberration_configs(5, 3, -1, 1, rng=7)
+    b, _ = bp.create_random_aberration_configs(5, 3, -1, 1, rng=np.random.default_rng(7))
+    np.testing.assert_array_equal(a, b)
+    s1, _ = bp.create_sparse_aberration_configs_mono(5, 3, -1, 1, rng=7)
+    s2, _ = bp.create_sparse_aberration_configs_mono(5, 3, -1, 1, rng=7)
+    np.testing.assert_array_equal(s1, s2)
+    # rng=None keeps drawing from numpy's global state
+    np.random.seed(3)
+    c, _ = bp.create_random_aberration_configs(5, 3, -1, 1)
+    np.random.seed(3)
+    np.testing.assert_array_equal(c, np.random.uniform(-1, 1, (5, 3)))
+
+
+def test_core_matching_does_not_depend_on_order():
+    from cbeam.waveguide import hex_ring_positions
+
+    ideal = np.asarray(hex_ring_positions(3, 1.0))
+    rng = np.random.default_rng(0)
+    a = np.radians(2.0)                              # small residual rotation
+    R = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+    truth = rng.permutation(len(ideal))              # detected k <-> ideal truth[k]
+    detected = 43.2 * ideal[truth] @ R.T + [5.0, -3.0]
+    detected += rng.normal(scale=0.5, size=detected.shape)
+
+    np.testing.assert_array_equal(bp.map_evaluated_to_ideal_geometry(detected, ideal), truth)
+    # shuffling the ideal list too only relabels the answer
+    shuffle = rng.permutation(len(ideal))
+    perm = bp.map_evaluated_to_ideal_geometry(detected, ideal[shuffle])
+    np.testing.assert_array_equal(shuffle[perm], truth)
+
+
+def test_batch_collect_subpixel_signals():
+    from scipy.ndimage import map_coordinates
+
+    rng = np.random.default_rng(0)
+    images = rng.random((3, 40, 40))
+    coords = rng.uniform(5, 35, size=(2, 4, 5, 5))
+    ref = np.array([[map_coordinates(img, coords[:, k].reshape(2, -1), order=1).mean()
+                     for k in range(4)] for img in images])
+    out = np.asarray(bp.batch_collect_subpixel_signals(images, coords))
+    assert out.shape == (3, 4)
+    np.testing.assert_allclose(out, ref, rtol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
 # whole pipeline
 # --------------------------------------------------------------------------- #
 @pytest.mark.slow

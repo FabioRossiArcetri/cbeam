@@ -70,7 +70,7 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     return params
 
 
-def create_sparse_aberration_configs_mono(n, m, minv, maxv):
+def create_sparse_aberration_configs_mono(n, m, minv, maxv, rng=None):
     """
     Generate *n* random aberration configurations where each configuration
     has only one active mode (value) that varies, while others remain zero.
@@ -80,6 +80,10 @@ def create_sparse_aberration_configs_mono(n, m, minv, maxv):
         m    (int): Number of modes available (indices 0 to m-1).
         minv (float): Minimum amplitude (nm).
         maxv (float): Maximum amplitude (nm).
+        rng  (None | int | np.random.Generator): random source. None
+                     (default) draws from numpy's global random state, so
+                     np.random.seed() controls it; an int seed or a
+                     Generator draws from that generator instead.
 
     Returns:
         coeff_matrix : np.ndarray of shape (n, m), dtype float64.
@@ -87,8 +91,13 @@ def create_sparse_aberration_configs_mono(n, m, minv, maxv):
                        (same convention as create_ramp_aberration_configs).
     """
     configs = np.zeros((n, m), dtype=np.float64)
-    random_mode_indices = np.random.randint(0, m, size=n)
-    amplitudes = np.random.uniform(minv, maxv, size=n)
+    if rng is None:
+        random_mode_indices = np.random.randint(0, m, size=n)
+        amplitudes = np.random.uniform(minv, maxv, size=n)
+    else:
+        rng = np.random.default_rng(rng)
+        random_mode_indices = rng.integers(0, m, size=n)
+        amplitudes = rng.uniform(minv, maxv, size=n)
     configs[np.arange(n), random_mode_indices] = amplitudes
 
     labels = [f"mode {int(i)} | {a:.1f} nm"
@@ -96,7 +105,7 @@ def create_sparse_aberration_configs_mono(n, m, minv, maxv):
     return configs, labels
 
 
-def create_random_aberration_configs(n, m, minv, maxv):
+def create_random_aberration_configs(n, m, minv, maxv, rng=None):
     """
     Generate *n* random aberration configurations each with *m* active modes.
 
@@ -105,6 +114,10 @@ def create_random_aberration_configs(n, m, minv, maxv):
         m    (int):   Number of active modes per config (modes 0 … m-1).
         minv (float): Minimum amplitude (nm).
         maxv (float): Maximum amplitude (nm).
+        rng  (None | int | np.random.Generator): random source. None
+                     (default) draws from numpy's global random state, so
+                     np.random.seed() controls it; an int seed or a
+                     Generator draws from that generator instead.
 
     Returns:
         coeff_matrix : np.ndarray of shape (n, m), dtype float64.
@@ -112,7 +125,10 @@ def create_random_aberration_configs(n, m, minv, maxv):
                        (no single active mode, so the label reports the
                        per-config RMS amplitude instead).
     """
-    configs = np.random.uniform(minv, maxv, (n, m)).astype(np.float64)
+    if rng is None:
+        configs = np.random.uniform(minv, maxv, (n, m)).astype(np.float64)
+    else:
+        configs = np.random.default_rng(rng).uniform(minv, maxv, (n, m))
     labels = [f"random #{k} | rms {np.sqrt(np.mean(row ** 2)):.0f} nm"
               for k, row in enumerate(configs)]
     return configs, labels

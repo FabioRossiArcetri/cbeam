@@ -13,10 +13,36 @@ from .constants import (
 )
 
 
-def batch_collect_subpixel_signals(images: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
+def batch_collect_subpixel_signals(images, coords):
+    """Per-core signals for a whole batch of images in one call, on either
+    backend (jit-compiled on jax).
+
+    images : (n_images, n_rows, n_cols) intensity maps.
+    coords : (2, n_cores, n, n) fractional (row, col) pixel coordinates of
+        the n x n sampling window around each core.
+
+    Returns (n_images, n_cores): the mean of each window, sampled with
+    *bilinear* interpolation (jax's map_coordinates supports order <= 1) --
+    so values differ slightly from collect_subpixel_signals, which samples
+    the same windows with cubic interpolation.
+    """
+    return _batch_collect_subpixel_signals(images, coords)
+
+
+def _batch_collect_subpixel_signals_np(images, coords):
+    coords = np.asarray(coords)
+    n_cores = coords.shape[1]
+    flat = coords.reshape(2, -1)
+    return np.stack([
+        map_coordinates(np.asarray(img), flat, order=1, mode='constant', cval=0.0)
+        .reshape(n_cores, -1).mean(axis=1)
+        for img in images])
+
+
+def _batch_collect_subpixel_signals_jax(images, coords):
     rows = coords[0]  # Shape: (N_SIGNALS, DEFAULT_SUBPIXEL_N, DEFAULT_SUBPIXEL_N)
     cols = coords[1]  # Shape: (N_SIGNALS, DEFAULT_SUBPIXEL_N, DEFAULT_SUBPIXEL_N)
-    
+
     def extract_single_core_patch(img, r_coords, c_coords):
         c_pack = jnp.stack([r_coords, c_coords], axis=0)
         patch = jax.scipy.ndimage.map_coordinates(img, c_pack, order=1, mode='constant', cval=0.0)
@@ -29,7 +55,9 @@ def batch_collect_subpixel_signals(images: jnp.ndarray, coords: jnp.ndarray) -> 
 
 
 if backend == 'jax':
-    batch_collect_subpixel_signals = jax.jit(batch_collect_subpixel_signals)
+    _batch_collect_subpixel_signals = jax.jit(_batch_collect_subpixel_signals_jax)
+else:
+    _batch_collect_subpixel_signals = _batch_collect_subpixel_signals_np
 
 
 def _peak_centroids(intensity_2d, x0, y0, dx, dy, n_expected=N_SIGNALS,
@@ -107,49 +135,66 @@ def calibrate_subpixel_centers(total_modes_profile, mesh_final,
 
 
 
-def map_evaluated_to_ideal_geometry(core_centers, ideal_centers_list):
-    """Calculates optimal rigid alignment (Procrustes SVD) and assigns global indexes.
+def map_evaluated_to_ideal_geometry(core_centers, ideal_centers_list, max_iter=10):
+    """Match detected core centres to the ideal port layout; returns
+    ``ideal_permutation`` with ``ideal_permutation[k]`` = index in
+    ``ideal_centers_list`` of detected core ``k`` (so
+    ``standardized[ideal_permutation] = signals`` puts the signals in ideal
+    order).
 
-    NOTE: the cross-covariance ``H = eval_scaled.T @ ideal_centered`` is built
-    with an *identity* correspondence -- row k of ``core_centers`` is assumed to
-    describe the same physical core as row k of ``ideal_centers_list``.  That
-    only holds because both lists arrive in the same order (``_peak_centroids``
-    returns centres sorted by ``(round(y, 2), round(x, 2))`` and
-    ``ideal_grid_positions`` is built in that same order).  If either ordering
-    changes, the initial alignment is wrong and the Hungarian match below can
-    lock in a bad permutation -- sort both lists the same way first.
+    Both sets are centred and scaled to the same RMS radius, then matched by
+    minimum total distance (Hungarian assignment), alternating with a rigid
+    Procrustes fit of the matched pairs to absorb a residual rotation, until
+    the assignment stops changing. The order of either list does not matter.
+    The two layouts are assumed to share their orientation up to that small
+    residual rotation -- true for detected output cores against
+    ``hex_ring_positions`` (the function the lantern geometry itself is built
+    from); a hex grid fits itself equally well every 60 degrees, so a large
+    rotation could not be recovered unambiguously anyway.
     """
-    ideal_centers = np.array(ideal_centers_list)
-    eval_centers = np.array(core_centers)
+    ideal_centers = np.array(ideal_centers_list, dtype=float)
+    eval_centers = np.array(core_centers, dtype=float)
 
     if ideal_centers.shape != eval_centers.shape:
         raise ValueError(
             f"core_centers {eval_centers.shape} and ideal_centers "
-            f"{ideal_centers.shape} must match: an identity correspondence is "
-            f"assumed for the Procrustes fit.")
+            f"{ideal_centers.shape} must match: every detected core is "
+            f"assigned to exactly one ideal port.")
 
     ideal_centered = ideal_centers - np.mean(ideal_centers, axis=0)
     eval_centered = eval_centers - np.mean(eval_centers, axis=0)
-    
+
     scale_ideal = np.sqrt(np.mean(np.sum(ideal_centered**2, axis=1)))
     scale_eval = np.sqrt(np.mean(np.sum(eval_centered**2, axis=1)))
     eval_scaled = eval_centered * (scale_ideal / scale_eval)
-    
-    H = np.dot(eval_scaled.T, ideal_centered)
-    U, S, Vt = np.linalg.svd(H)
-    # determinant correction: without it R can come out as a reflection
-    # (improper rotation), which mirrors the detected grid before matching.
-    d = np.sign(np.linalg.det(np.dot(Vt.T, U.T)))
-    R = np.dot(Vt.T, np.dot(np.diag([1.0, d]), U.T))
-    eval_aligned = np.dot(eval_scaled, R.T)
 
-    diff = eval_aligned[:, np.newaxis, :] - ideal_centered[np.newaxis, :, :]
-    cost_matrix = np.sqrt(np.sum(diff**2, axis=-1))
-    eval_indices, ideal_permutation = linear_sum_assignment(cost_matrix)
+    def assign(points):
+        diff = points[:, np.newaxis, :] - ideal_centered[np.newaxis, :, :]
+        cost = np.sqrt(np.sum(diff**2, axis=-1))
+        _, perm = linear_sum_assignment(cost)
+        return perm, cost[np.arange(len(perm)), perm]
 
+    R = np.eye(2)
+    ideal_permutation, dist = assign(eval_scaled)
+    for _ in range(max_iter):
+        H = np.dot(eval_scaled.T, ideal_centered[ideal_permutation])
+        U, S, Vt = np.linalg.svd(H)
+        # determinant correction: without it R can come out as a reflection
+        # (improper rotation), which mirrors the detected grid before matching.
+        d = np.sign(np.linalg.det(np.dot(Vt.T, U.T)))
+        R = np.dot(Vt.T, np.dot(np.diag([1.0, d]), U.T))
+        eval_aligned = np.dot(eval_scaled, R.T)
+        new_permutation, dist = assign(eval_aligned)
+        if np.array_equal(new_permutation, ideal_permutation):
+            break
+        ideal_permutation = new_permutation
+
+    angle = np.degrees(np.arctan2(R[1, 0], R[0, 0]))
     print(f"[Geometric Fit] Detected/ideal scale ratio: {scale_eval / scale_ideal:.3f}")
-    print(f"[Geometric Fit] Residual matching RMS error: {np.mean(cost_matrix[eval_indices, ideal_permutation]):.4e}\n")
-    
+    print(f"[Geometric Fit] Residual rotation: {angle:.3f} deg")
+    print(f"[Geometric Fit] Residual matching RMS error: {np.sqrt(np.mean(dist**2)):.4e} "
+          f"(in units of the ideal layout)\n")
+
     return ideal_permutation
 
 

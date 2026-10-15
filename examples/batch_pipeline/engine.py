@@ -198,7 +198,9 @@ class ModalProjector:
 
 
 class IncidentFieldGenerator:
-    """Fixed version with correct centering and axis mapping."""
+    """Build batches of DM-aberrated pupil fields from influence-function
+    coefficients, form their focal-plane image (zero-padded FFT) and sample it
+    on the lantern's input mesh."""
 
     def __init__(self, p, ifunc, xp=np, pupil_template=None):
         self.p     = p
@@ -718,14 +720,17 @@ class BatchPropagationPipeline:
         ----------
         u0_batch   : np.ndarray, shape (n_fields, n_modes)
         chunk_size : int or None
-            If None a safe default is chosen:
-              - JAX backend:   32  (tune upward if GPU has headroom)
+            If None a default is chosen:
+              - JAX backend:   ``constants.default_chunk_size`` (10000;
+                lower it if GPU memory runs out)
               - numpy backend: full batch (no chunking needed)
 
         Returns
         -------
         uf_batch  : np.ndarray (n_fields, n_modes)
-        zs        : array of z values (from the last chunk; all identical)
+        zs        : array of z values of the last chunk's trajectory (on
+                    numpy the adaptive steps differ from chunk to chunk; on
+                    jax only the segment endpoints are saved)
         us_batch  : np.ndarray (n_fields, n_z, n_modes) or None
                     Full trajectory — only populated for single-chunk runs
                     to avoid excessive memory use.
