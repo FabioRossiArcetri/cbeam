@@ -13,12 +13,10 @@ def main_batch_propagation(ifunc):
 
     Parameters
     ----------
-    ifunc : the DM influence-function object (e.g. a
-        ``specula.data_objects.ifunc.IFunc`` restored from a FITS file).
-        Loading it is the caller's job -- this module (and the rest of
-        ``batch_pipeline``) has no specula dependency of its own, so it can
-        be imported and reused without specula installed. See
-        examples/BatchedPiston.ipynb for a worked example of loading one.
+    ifunc : the DM influence-function object, e.g.
+        ``batch_pipeline.load_ifunc(get_simulation_parameters()["ifunc_file"])``
+        -- a specula ``IFunc`` when specula is installed, a plain-numpy
+        ``SimpleIFunc`` otherwise. See examples/BatchedPiston.ipynb.
     """
     print("=" * 60)
     print("PHOTONIC LANTERN BATCH PROPAGATION PIPELINE")
@@ -96,10 +94,5 @@ def main_batch_propagation(ifunc):
 
 
 if __name__ == "__main__":
-    raise SystemExit(
-        "main_batch_propagation(ifunc) needs a DM influence-function object "
-        "as its argument (e.g. specula.data_objects.ifunc.IFunc.restore(...)); "
-        "this module intentionally has no specula dependency of its own. "
-        "See examples/BatchedPiston.ipynb for a worked example of loading one and "
-        "calling this function."
-    )
+    from .ifunc import load_ifunc
+    main_batch_propagation(load_ifunc(get_simulation_parameters()["ifunc_file"]))

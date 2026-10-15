@@ -10,6 +10,7 @@ from scipy.spatial import Delaunay
 from cbeam.waveguide import PhotonicLantern
 from cbeam.propagator import Propagator, ChainPropagator
 
+from .ifunc import to_numpy
 from .constants import (
     backend, jax, jnp, _jax_device,
     default_chunk_size, default_gen_chunk_size, DEFAULT_GRID_RESOLUTION,
@@ -202,11 +203,11 @@ class IncidentFieldGenerator:
             # instead of re-reading/re-stacking ifunc.influence_function.
             self.mask_np, self.grid_size, self.num_modes, self.ifunc_matrix = pupil_template
         else:
-            self.mask_np   = ifunc.mask_inf_func.get() > 0
+            # to_numpy: specula keeps these on its own device (CuPy on a GPU)
+            self.mask_np   = to_numpy(ifunc.mask_inf_func) > 0
             self.grid_size = self.mask_np.shape[0]
             self.num_modes = len(ifunc.influence_function)
-            self.ifunc_matrix = xp.stack(
-                [f.get() for f in ifunc.influence_function], axis=0)
+            self.ifunc_matrix = xp.array(to_numpy(ifunc.influence_function))
 
     def _pad_geometry(self):
         """(pad_width, padded_size) of the symmetric zero-padded FFT grid.

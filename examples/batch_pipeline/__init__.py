@@ -1,13 +1,14 @@
 """batch_pipeline -- photonic-lantern batch propagation, split into
-constants / config / engine / analysis / plots / benchmark / run submodules.
+constants / config / ifunc / engine / analysis / plots / benchmark / run
+submodules.
 
-This package has no dependency on specula: everywhere it needs DM
-influence-function data (field generation in ``engine.IncidentFieldGenerator``
-/ ``engine.BatchPropagationPipeline``, and the demo entry point in
+specula is optional: everywhere the pipeline needs DM influence-function data
+(field generation in ``engine.IncidentFieldGenerator`` /
+``engine.BatchPropagationPipeline``, and the demo entry point in
 ``run.main_batch_propagation``), it takes an already-loaded ``ifunc`` object
-as a plain argument. Loading that object via
-``specula.data_objects.ifunc.IFunc`` is the caller's job -- see
-examples/BatchedPiston.ipynb for a worked example.
+as a plain argument. ``ifunc.load_ifunc`` loads one as specula's ``IFunc``
+when specula is installed and as the plain-numpy ``ifunc.SimpleIFunc``
+otherwise, with bit-identical results -- see examples/BatchedPiston.ipynb.
 """
 from __future__ import annotations
 
@@ -29,6 +30,11 @@ from .config import (
     create_sparse_aberration_configs_mono,
     create_random_aberration_configs,
     create_ramp_aberration_configs,
+)
+from .ifunc import (
+    SimpleIFunc,
+    load_ifunc,
+    center_ifunc_mask,
 )
 from .engine import (
     wavelength_tag,
@@ -66,6 +72,7 @@ __all__ = [
     "DEFAULT_SUBPIXEL_N", "N_RINGS", "N_SIGNALS",
     "get_simulation_parameters", "create_sparse_aberration_configs_mono",
     "create_random_aberration_configs", "create_ramp_aberration_configs",
+    "SimpleIFunc", "load_ifunc", "center_ifunc_mask",
     "wavelength_tag", "build_and_characterize_lantern", "get_waveguide_properties",
     "ModalProjector", "IncidentFieldGenerator", "BatchPropagationPipeline",
     "calibrate_subpixel_centers", "map_evaluated_to_ideal_geometry",

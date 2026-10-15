@@ -38,7 +38,7 @@ def diagnose_input_psf(pipeline):
     
     if abs(mask_center_y - expected_center) > 0.1 or abs(mask_center_x - expected_center) > 0.1:
         print("  ⚠️  WARNING: Mask is off-center! This will cause PSF misalignment.")
-        print("  Recommendation: Re-center the mask before loading or adjust in IFunc object.")
+        print("  Recommendation: re-center it with batch_pipeline.center_ifunc_mask(ifunc) before building the pipeline.")
 
     # 3. Extract field at key stages
     Ef_input = fg_np.generate_field_profiles_batch(zero_coeffs)
@@ -227,7 +227,7 @@ def diagnose_input_psf(pipeline):
         for issue in issues:
             print(f"  {issue}")
         print("\nRecommendations:")
-        print("  1. Check mask centering in IFunc")
+        print("  1. Check mask centering (batch_pipeline.center_ifunc_mask)")
         print("  2. Verify pixel_scale_um matches FFT grid spacing")
         print("  3. Check mesh interpolation coordinate mapping")
     else:

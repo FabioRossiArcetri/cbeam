@@ -9,12 +9,12 @@ from .constants import (
     L1, L2, N_RINGS, DEFAULT_WAVELENGTH_UM,
 )
 
-# Influence-function FITS (the ANDES DM modal basis).  This default path only
-# exists on the machine the pipeline was developed on; point CBEAM_IFUNC_FILE
-# at your own copy to run anywhere else.
-DEFAULT_IFUNC_FILE = (
-    '/raid2/gcarla/git/ANDES/andes/PASSATA_scripts/data/ifunc/'
-    'ANDES_400pix_all_modes.fits'
+# Influence-function FITS (the ANDES DM modal basis), bundled under
+# examples/ifunc/.  Point CBEAM_IFUNC_FILE at another specula-format FITS
+# file to use a different one.
+DEFAULT_IFUNC_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'ifunc', 'ANDES_400pix_all_modes.fits',
 )
 
 
