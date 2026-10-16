@@ -44,3 +44,22 @@ simulated spectrograph detector and extracts them back (optimal extraction).
 Each wavelength needs its own characterization: minutes per wavelength the
 first time, cached in `examples/data/` afterwards (41 wavelengths take a few
 hours to characterize).
+
+## Wavefront reconstruction (machine learning)
+
+`ml_reconstruct/` reconstructs DM-mode coefficients (here the petal pistons)
+from simulated lantern signals: dataset generation, a JAX MLP, sparse and
+dense polynomial fits, Zernike features and a multi-wavelength phase unwrap.
+
+| | |
+|---|---|
+| `trainMLP.ipynb` | one wavelength, pistons within +-lambda/2: MLP vs. linear, k-NN, polynomial (dense / OMP), Zernike features, optional symbolic regression |
+| `trainMLP_multiwavelength.ipynb` | +-5 um pistons from the 41-wavelength spectral response: single models on the whole spectrum |
+| `PL19_EML.ipynb` | the same data: one model per wavelength on the wrapped piston, fused by a multi-wavelength unwrap |
+
+The datasets and fitted models are written to `examples/data/ml/`. Generating
+the single-wavelength dataset takes ~15-40 minutes; the spectral one (50000
+samples x 41 wavelengths) several hours, best on a GPU with the jax backend.
+
+These notebooks also need **jax + optax** and **scikit-learn**; the optional
+symbolic-regression cell needs **PySR** (and Julia).
