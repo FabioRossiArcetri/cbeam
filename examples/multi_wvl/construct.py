@@ -11,7 +11,7 @@ from batch_pipeline.constants import (
     default_degenerate_groups_front, default_degenerate_groups_back,
     default_skipped_modes_front, default_skipped_modes_back,
 )
-from batch_pipeline.engine import wavelength_tag
+from batch_pipeline.engine import characterization_tag
 
 from .params import scale_params_to_wavelength, build_lantern_geometry
 from .bookkeeping import infer_lantern_mode_bookkeeping
@@ -120,13 +120,12 @@ def _characterization_cached(prop: Propagator, tag: str) -> bool:
 def build_and_characterize_lantern_at_wavelength(
     base_params: dict,
     wavelength_nm: float,
-    n_modes: int = 20,
+    n_modes: Optional[int] = None,
     skipped_modes: Optional[List[int]] = None,
     degen_groups: Optional[List[List[int]]] = None,
     z_split: Optional[float] = None,
-    cache_prefix: str = "port",
     PL_N: Optional[PhotonicLantern] = None,
-    auto_mode_bookkeeping: bool = False,
+    auto_mode_bookkeeping: Optional[bool] = None,
     verbose: bool = True,
 ) -> Tuple[dict, ChainPropagator]:
     """
@@ -149,13 +148,16 @@ def build_and_characterize_lantern_at_wavelength(
         Number of local modes tracked by the Propagator.
     skipped_modes, degen_groups : optional overrides
         Explicit overrides win over everything. Default reproduces the
-        single-wavelength pipeline's configuration ([18] skipped; the
-        front-half degenerate LP-mode pairs grouped) -- valid at 800 nm,
-        NOT across wavelength (LP degeneracies split, avoided crossings
-        move as V changes). For any wavelength away from 800 nm, either
-        pass explicit lists or set auto_mode_bookkeeping=True.
-    auto_mode_bookkeeping : bool
-        When True and neither skipped_modes nor degen_groups is given,
+        single-wavelength pipeline's configuration for this port count
+        (the last tracked mode skipped; the front-half degenerate LP-mode
+        pairs of batch_pipeline.constants grouped). For the 7-port lantern
+        that table was checked against infer_lantern_mode_bookkeeping over
+        the whole 1100-1300 nm band; for another design or band either
+        check it the same way, pass explicit lists, or set
+        auto_mode_bookkeeping=True.
+    auto_mode_bookkeeping : bool or None
+        None (default): the lantern's own setting (``auto_bookkeeping`` in
+        batch_pipeline.LANTERNS). When True and neither skipped_modes nor degen_groups is given,
         and this wavelength is about to be characterised from scratch
         (no cache), derive degen_groups (front + back separately) and
         skipped_modes automatically from FEM solves at the two lantern
@@ -166,8 +168,8 @@ def build_and_characterize_lantern_at_wavelength(
         segments. Defaults to base_params["z_ex"] / 2, matching the
         symmetric L1 == L2 == 50000 split used elsewhere in this codebase.
         Override if your front/back split isn't at the midpoint.
-    cache_prefix : str
-        Prefix for the load/save tag, e.g. str(n_output_positions) + "port" -> "19port_0800_front".
+    The cache tag is batch_pipeline.characterization_tag(base_params,
+        wavelength_nm), e.g. "19port_0800_front" / "pl7_1200_1150_back".
     PL_N : PhotonicLantern or None
         A pre-built, wavelength-independent lantern geometry to reuse
         (see build_lantern_geometry()). If None, one is built here --
@@ -183,11 +185,16 @@ def build_and_characterize_lantern_at_wavelength(
     """
     p_lambda = scale_params_to_wavelength(base_params, wavelength_nm)
 
+    if n_modes is None:
+        # local modes = guided core supermodes + the cladding mode
+        n_modes = base_params["n_output_positions"] + 1
+
     z_ex = p_lambda["z_ex"]
     _z_split = z_split if z_split is not None else z_ex / 2.0
-    n_output_positions = str(base_params["n_output_positions"])
-
-    tag = f"{n_output_positions}{cache_prefix}_{wavelength_tag(wavelength_nm)}"
+    tag = characterization_tag(base_params, wavelength_nm)
+    if auto_mode_bookkeeping is None:
+        auto_mode_bookkeeping = bool(base_params.get("auto_bookkeeping", False))
+    lantern = base_params["lantern"]
 
     PL_N = PL_N if PL_N is not None else build_lantern_geometry(p_lambda)
 
@@ -210,14 +217,15 @@ def build_and_characterize_lantern_at_wavelength(
         )
         _skipped_set = set(_skipped)
     else:
-        _skipped = list(skipped_modes) if skipped_modes is not None else [18]
+        _skipped = (list(skipped_modes) if skipped_modes is not None
+                    else sorted(default_skipped_modes_front[lantern]))
         _skipped_set = set(_skipped)
         # Copy the module-global grouping so an in-place mutation by the
         # propagator can't poison it for the next wavelength in a loop
         # (matches build_and_characterize_lantern in the single-wl pipeline).
         _degen_front = (
             [list(g) for g in degen_groups] if degen_groups is not None
-            else [list(g) for g in default_degenerate_groups_front[base_params["nrings"]]]
+            else [list(g) for g in default_degenerate_groups_front[lantern]]
         )
         _degen_back = [[i for i in range(n_modes) if i not in _skipped_set]]
 

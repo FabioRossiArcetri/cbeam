@@ -3,6 +3,7 @@
 Pure processing -- this module imports no matplotlib.
 """
 from __future__ import annotations
+import os
 import numpy as np
 import scipy.fft as sp_fft
 from scipy.spatial import Delaunay
@@ -41,12 +42,27 @@ if backend == 'jax':
     _apply_pupil_jax_core = jax.jit(_jax_fft_batch, static_argnames=['pad_width'])
 
 
+# Threads of the CPU field-generation FFT: all cores by default.  Set
+# CBEAM_FFT_WORKERS=1 when running many processes side by side (e.g. dataset
+# chunks in parallel) -- scipy.fft ignores OMP_NUM_THREADS, so otherwise every
+# process starts one FFT thread per core and the host is oversubscribed.
+_FFT_WORKERS = int(os.environ.get("CBEAM_FFT_WORKERS", "-1"))
+
+
 def wavelength_tag(wavelength_nm: float) -> str:
     """Filename tag matching the convention used for the 800 nm cache
     (800.0 nm -> '0800'). Adjust if your cache naming differs, or if your
     native grid isn't on round-nm values -- in that case you likely want
     an explicit {wavelength_nm: tag} mapping instead of this formula."""
     return f"{int(round(wavelength_nm)):04d}"
+
+
+def characterization_tag(p, wavelength_nm=None):
+    """Cache tag of a lantern's characterization at one wavelength, e.g.
+    '19port_0800' (pl19_800, the original naming) or 'pl7_1200_1150'. The
+    lantern's cache_tag (batch_pipeline.LANTERNS) keeps designs apart."""
+    wl = p["wavelength_nm"] if wavelength_nm is None else wavelength_nm
+    return f"{p['cache_tag']}_{wavelength_tag(wl)}"
 
 
 def build_and_characterize_lantern(p, reuse_cache=False):
@@ -66,10 +82,7 @@ def build_and_characterize_lantern(p, reuse_cache=False):
     L1_ = p.get("L1", L1)
     L2_ = p.get("L2", L2)
 
-    cache_prefix       = "port"
-    n_output_positions = str(p["n_output_positions"])
-    wavelength_nm      = p["wavelength_nm"]
-    tag_base = f"{n_output_positions}{cache_prefix}_{wavelength_tag(wavelength_nm)}"
+    tag_base = characterization_tag(p)
 
     def _characterize_or_load(prop, zi, zf, tag, seed=None):
         if reuse_cache:
@@ -83,11 +96,11 @@ def build_and_characterize_lantern(p, reuse_cache=False):
             prop.load_init_conds(seed)
         prop.characterize(zi, zf, save=True, tag=tag)
 
-    nr = p["nrings"]
+    nr = p["lantern"]
     if nr not in default_degenerate_groups_front:
         raise ValueError(
-            f"no default degen_groups / skipped_modes configured for nrings={nr}; "
-            f"only nrings={sorted(default_degenerate_groups_front)} is set up. "
+            f"no default degen_groups / skipped_modes configured for lantern {nr!r}; "
+            f"only {sorted(default_degenerate_groups_front)} are set up. "
             f"Add entries to default_*_front/back, or set prop.degen_groups=[] / "
             f"prop.skipped_modes=set() explicitly to run without mode bookkeeping."
         )
@@ -358,7 +371,7 @@ class IncidentFieldGenerator:
             sp_fft.fft2(
                 sp_fft.ifftshift(E_padded, axes=(1, 2)),
                 axes=(1, 2),
-                workers=-1,
+                workers=_FFT_WORKERS,
             ),
             axes=(1, 2),
         )

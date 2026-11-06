@@ -38,7 +38,7 @@ class SpectralImageSimulator:
         print(f"  Detector: {config.detector_width} x {config.detector_height} pixels")
 
     # ------------------------------------------------------------------
-    def compute_fiber_positions(self, n_fibers: int = 19) -> np.ndarray:
+    def compute_fiber_positions(self, n_fibers: int = 7) -> np.ndarray:
         """Y-coordinate (row) of each fiber trace: n_fibers equally spaced,
         centred on the detector."""
         cfg = self.cfg

@@ -5,9 +5,7 @@ import numpy as np
 
 from cbeam.waveguide import hex_ring_positions
 
-from .constants import (
-    L1, L2, N_RINGS, DEFAULT_WAVELENGTH_UM,
-)
+from .constants import L1, L2, LANTERNS, DEFAULT_LANTERN
 
 # Influence-function FITS (the ANDES DM modal basis), bundled under
 # examples/ifunc/.  Point CBEAM_IFUNC_FILE at another specula-format FITS
@@ -18,24 +16,80 @@ DEFAULT_IFUNC_FILE = os.path.join(
 )
 
 
-def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_UM):
-    """Return a dict of all setup constants and derived parameters."""
+def _v_number(rclad, wavelength_um, nclad, njack):
+    """Normalised frequency of the multimode end (cladding as core, jacket as cladding)."""
+    return 2 * np.pi * rclad / wavelength_um * np.sqrt(nclad ** 2 - njack ** 2)
 
+
+# The reference design's multimode end and PSF fill: the PSF of every lantern
+# is sized relative to its multimode end the same way (see below).
+_REF = LANTERNS["pl19_800"]
+V_MMF_REF = _v_number(_REF["rclad"], _REF["wavelength_um"], _REF["nclad"],
+                      _REF["nclad"] + _REF["dn_jack"])
+PSF_FILL_REF = 0.30
+
+
+def _match_lantern(nrings, wavelength_um):
+    """The preset a legacy positional call means: the default lantern if it
+    fits (nrings, wavelength_um), else the one preset whose ring count and
+    design wavelength match -- e.g. (3, 0.8) is always pl19_800."""
+    def fits(L):
+        return ((nrings is None or L["nrings"] == nrings) and
+                (wavelength_um is None or abs(L["wavelength_um"] - wavelength_um) < 1e-9))
+    if fits(LANTERNS[DEFAULT_LANTERN]):
+        return DEFAULT_LANTERN
+    hits = [n for n, L in LANTERNS.items() if fits(L)]
+    if len(hits) == 1:
+        return hits[0]
+    if nrings is not None and wavelength_um is not None:
+        # e.g. the default lantern at another wavelength: keep the default's design
+        same_rings = [n for n, L in LANTERNS.items() if L["nrings"] == nrings]
+        if DEFAULT_LANTERN in same_rings:
+            return DEFAULT_LANTERN
+    raise ValueError(f"no unique lantern preset for nrings={nrings}, wavelength_um="
+                     f"{wavelength_um}; name it with lantern= (one of {sorted(LANTERNS)})")
+
+
+def get_simulation_parameters(nrings=None, wavelength_um=None, lantern=None):
+    """Return a dict of all setup constants and derived parameters of a lantern.
+
+    lantern       : a name in batch_pipeline.LANTERNS (default: CBEAM_LANTERN,
+                    else "pl19_800").
+    nrings        : optional check -- must match the lantern's (kept so that
+                    get_simulation_parameters(3, 0.8) still means the
+                    reference 19-port lantern).
+    wavelength_um : operating wavelength; default the lantern's design
+                    wavelength. The geometry, indices and PSF pixel scale do
+                    not change with it (multi_wvl.scale_params_to_wavelength
+                    rescales the pixel scale per wavelength).
+    """
+    name = lantern if lantern is not None else _match_lantern(nrings, wavelength_um)
+    if name not in LANTERNS:
+        raise ValueError(f"unknown lantern {name!r}; known: {sorted(LANTERNS)}")
+    L = LANTERNS[name]
+    if nrings is not None and nrings != L["nrings"]:
+        raise ValueError(f"lantern {name!r} has nrings={L['nrings']}, not {nrings}; "
+                         f"pick the lantern by name (lantern=...)")
+    if wavelength_um is None:
+        wavelength_um = L["wavelength_um"]
     wavelength_nm = wavelength_um * 1000.0
-    scaling_factor = wavelength_um / DEFAULT_WAVELENGTH_UM
-    # scaling_factor = 1.0
 
     params = {
-        "nrings":        nrings,
+        "lantern":       name,
+        "cache_tag":     L["cache_tag"],
+        "band_nm":       L["band_nm"],
+        "auto_bookkeeping": L["auto_bookkeeping"],
+        "nrings":        L["nrings"],
         "wl":            wavelength_um,
         "wavelength_nm": wavelength_nm,
-        "taper_factor":  12.,
-        "rclad":         9.0,
-        "rjack":         27,
+        "design_wavelength_um": L["wavelength_um"],
+        "taper_factor":  L["taper_factor"],
+        "rclad":         L["rclad"],
+        "rjack":         L["rjack"],
         "L1":            L1,
         "L2":            L2,
         "z_ex":          L1 + L2,
-        "nclad":         1.444,
+        "nclad":         L["nclad"],
         "pad_factor":    4,
         "core_res":      16,
         "clad_res":      60,
@@ -43,14 +97,14 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
         # "pixel_scale_um" (μm/px in the padded FFT grid) is derived below.
         "ifunc_file":    os.environ.get("CBEAM_IFUNC_FILE", DEFAULT_IFUNC_FILE),
     }
-    params["rcore"]  = 1.8 / params["taper_factor"]
-    params["ncore"]  = params["nclad"] + 8.8e-3
-    params["njack"]  = params["nclad"] - 5.5e-3
-    params["output_positions"] = hex_ring_positions(params["nrings"], params["rclad"] / 2.5)
+    params["rcore"]  = L["rcore"]
+    params["ncore"]  = params["nclad"] + L["dn_core"]
+    params["njack"]  = params["nclad"] + L["dn_jack"]
+    params["output_positions"] = hex_ring_positions(params["nrings"], params["rclad"] / L["ring_div"])
     params["n_output_positions"] = len(params["output_positions"])
     params["rcores"] = [params["rcore"]] * params["n_output_positions"]
     params["ncores"] = [params["ncore"]] * params["n_output_positions"]
-    
+
     # Focal-plane (post-FFT) pixel scale.
     #
     # The pupil field is sampled on grid_size px and zero-padded to
@@ -62,8 +116,14 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     # lantern mesh fell outside it -> "mesh points map outside FFT grid").
     #
     # pixel_scale_um is then fixed by requiring the Airy radius to equal
-    # psf_fill_factor * rclad in physical units.
-    psf_fill_factor = 0.30
+    # psf_fill_factor * rclad in physical units, at the design wavelength.
+    # The reference lantern uses a fill of 0.30 (V = 8.90); every lantern
+    # keeps the converging beam's NA relative to its multimode end's NA the
+    # same as there: with r_airy = 0.61 lambda / NA_beam that is
+    # fill = 0.30 * V_ref / V (exactly 0.30 for pl19_800).
+    params["V_mmf"] = _v_number(params["rclad"], L["wavelength_um"], params["nclad"], params["njack"])
+    psf_fill_factor = PSF_FILL_REF * V_MMF_REF / params["V_mmf"]
+    params["psf_fill_factor"] = psf_fill_factor
     r_airy_px = 1.22 * params["pad_factor"]
     params["pixel_scale_um"] = psf_fill_factor * params["rclad"] / r_airy_px
 

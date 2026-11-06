@@ -28,13 +28,13 @@ from spectral.dispersion import DispersionModel  # noqa: E402
 # multi_wvl
 # --------------------------------------------------------------------------- #
 def test_scale_params_to_wavelength():
-    base = bp.get_simulation_parameters(3, 0.8)
-    p = mw.scale_params_to_wavelength(base, 900.0)
-    assert p["wl"] == pytest.approx(0.9) and p["wavelength_nm"] == 900.0
-    assert p["pixel_scale_um"] == pytest.approx(base["pixel_scale_um"] * 900 / 800)
+    base = bp.get_simulation_parameters(lantern="pl7_1200")
+    p = mw.scale_params_to_wavelength(base, 1300.0)
+    assert p["wl"] == pytest.approx(1.3) and p["wavelength_nm"] == 1300.0
+    assert p["pixel_scale_um"] == pytest.approx(base["pixel_scale_um"] * 1300 / 1200)
     for k in ("nclad", "ncore", "njack", "rclad", "z_ex", "taper_factor"):
         assert p[k] == base[k]
-    assert base["wl"] == pytest.approx(0.8)          # base left untouched
+    assert base["wl"] == pytest.approx(1.2)          # base left untouched
 
 
 def test_multiplets():

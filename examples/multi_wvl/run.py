@@ -35,7 +35,7 @@ def example_multiwavelength_propagation(photons_per_nm: float = 1e5):
     # cached automatically on this call -- with 21 points and no existing
     # cache, expect on the order of a few hours the first time this runs
     # (see "Notes on cost" in MultiWavelengthPropagationPipeline).
-    native_wl_nm = np.linspace(700.0, 900.0, 21)
+    native_wl_nm = np.linspace(1100.0, 1300.0, 21)
 
     mwp = MultiWavelengthPropagationPipeline(
         base_params=base_params,
@@ -51,7 +51,7 @@ def example_multiwavelength_propagation(photons_per_nm: float = 1e5):
 
     # Fine output grid for the dispersed spectra (interpolated from the
     # coarse native grid above).
-    output_wl_nm = np.linspace(700.0, 900.0, 200)
+    output_wl_nm = np.linspace(1100.0, 1300.0, 200)
 
     power_spectra, wl_out = mwp.get_power_spectra(
         coeff_matrix,

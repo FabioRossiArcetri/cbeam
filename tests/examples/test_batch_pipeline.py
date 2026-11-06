@@ -4,7 +4,7 @@ The fast tests cover the influence-function loading (with and without
 specula) and the pupil -> FFT -> mesh field generation, on a small synthetic
 pupil.  The one ``slow`` test runs the whole pipeline -- characterization,
 field generation, batched propagation, output reconstruction and per-core
-signal extraction -- on a shortened 19-port lantern, as ``test_pl19.py``
+signal extraction -- on a shortened 7-port lantern (preset pl7_1200), as ``test_pl19.py``
 does for the plain ``ChainPropagator``.
 """
 
@@ -36,7 +36,7 @@ def _synthetic_ifunc(npix=64, radius=None, offset=(0, 0)):
 
 
 def _field_params(npix):
-    p = bp.get_simulation_parameters(3, 0.8)
+    p = bp.get_simulation_parameters(lantern="pl7_1200")
     # keep the padded grid's physical extent the same as for the 400 px pupil
     p["pixel_scale_um"] *= 400 / npix
     return p
@@ -90,7 +90,7 @@ def test_bundled_ifunc_specula_and_numpy_bit_identical():
     """What the pipeline sees must not depend on whether specula is installed."""
     pytest.importorskip("astropy")
     pytest.importorskip("specula")
-    p = bp.get_simulation_parameters(3, 0.8)
+    p = bp.get_simulation_parameters(lantern="pl7_1200")
     gens = []
     for use_specula in (True, False):
         ifunc = bp.load_ifunc(BUNDLED_IFUNC, use_specula=use_specula)
@@ -209,7 +209,7 @@ def test_batch_collect_subpixel_signals():
 def test_batch_pipeline_end_to_end(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)     # characterization is saved under ./data
 
-    p = bp.get_simulation_parameters(3, 0.8)
+    p = bp.get_simulation_parameters(lantern="pl7_1200")
     # shortened device and coarser mesh, as in test_pl19.py
     p.update(L1=4000, L2=4000, z_ex=8000, core_res=12, clad_res=40, jack_res=24)
     prop12 = bp.build_and_characterize_lantern(p)
@@ -248,7 +248,7 @@ def test_batch_pipeline_end_to_end(tmp_path, monkeypatch):
     assert grid.shape == (4, 120, 120)
     assert np.all(np.isfinite(grid)) and np.all(grid >= 0)
 
-    # on this short device only a few of the 19 output cores light up
+    # on this short device only a few of the 7 output cores may light up
     centers = bp.detect_centers_from_grid(grid.sum(axis=0), X, Y)
     assert 1 <= len(centers) <= bp.N_SIGNALS
     x0, y0 = X[0, 0], Y[0, 0]
@@ -257,3 +257,33 @@ def test_batch_pipeline_end_to_end(tmp_path, monkeypatch):
                         for g in grid])
     assert signals.shape == (4, len(centers))
     assert np.all(signals >= 0) and np.all(signals.sum(axis=1) > 0)
+
+
+# --------------------------------------------------------------------------- #
+# lantern presets
+# --------------------------------------------------------------------------- #
+def test_presets_are_consistent():
+    for name in bp.LANTERNS:
+        p = bp.get_simulation_parameters(lantern=name)
+        assert p["lantern"] == name
+        assert p["n_output_positions"] == {2: 7, 3: 19}[p["nrings"]]
+        # every preset has its mode tables, and skips exactly one of n+1 modes
+        assert len(bp.constants.default_skipped_modes_front[name]) == 1
+        assert max(bp.constants.default_skipped_modes_front[name]) <= p["n_output_positions"]
+        # outer ring half a pitch inside the cladding edge
+        r_out = max(np.hypot(*xy) for xy in p["output_positions"])
+        assert r_out < p["rclad"]
+
+
+def test_reference_preset_unchanged():
+    """pl19_800 must stay the original 19-port / 800 nm parameter set."""
+    p = bp.get_simulation_parameters(3, 0.8)
+    assert p["lantern"] == "pl19_800"
+    assert (p["rclad"], p["rjack"], p["taper_factor"], p["nclad"]) == (9.0, 27, 12.0, 1.444)
+    assert p["rcore"] == pytest.approx(0.15) and p["ncore"] == pytest.approx(1.4528)
+    assert p["njack"] == pytest.approx(1.4385)
+    assert p["psf_fill_factor"] == pytest.approx(0.30, abs=1e-12)
+    assert p["pixel_scale_um"] == pytest.approx(0.30 * 9.0 / (1.22 * 4), rel=1e-12)
+    assert bp.characterization_tag(p) == "19port_0800"
+    with pytest.raises(ValueError):
+        bp.get_simulation_parameters(2, lantern="pl19_800")

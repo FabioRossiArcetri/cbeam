@@ -24,6 +24,8 @@ from .constants import (
     DEFAULT_SUBPIXEL_N,
     N_RINGS,
     N_SIGNALS,
+    LANTERNS,
+    DEFAULT_LANTERN,
 )
 from .config import (
     get_simulation_parameters,
@@ -38,6 +40,7 @@ from .ifunc import (
 )
 from .engine import (
     wavelength_tag,
+    characterization_tag,
     build_and_characterize_lantern,
     get_waveguide_properties,
     ModalProjector,

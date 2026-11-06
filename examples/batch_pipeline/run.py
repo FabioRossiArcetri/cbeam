@@ -30,7 +30,7 @@ def main_batch_propagation(ifunc):
 
     print(f"\n[2/4] Building waveguide propagator...")
     prop12 = build_and_characterize_lantern(p)
-    print(f"      Modes: 20, Segments: 2")
+    print(f"      Modes: {p['n_output_positions'] + 1}, Segments: 2")
 
     print(f"\n[3/4] Initialising batch pipeline ...")
     # field_gen_on_gpu=False  → field generation uses NumPy/SciPy (CPU)

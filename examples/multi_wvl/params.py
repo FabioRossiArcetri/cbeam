@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Optional
 
-from cbeam.waveguide import PhotonicLantern, hex_ring_positions
+from cbeam.waveguide import PhotonicLantern
 
 
 def build_lantern_geometry(base_params: dict) -> PhotonicLantern:
@@ -31,7 +31,9 @@ def build_lantern_geometry(base_params: dict) -> PhotonicLantern:
     once and share the same PL_N object across every wavelength's
     Propagator.
     """
-    core_pos = hex_ring_positions(base_params["nrings"], base_params["rclad"] / 2.5)
+    # the core layout comes from get_simulation_parameters(): the same one
+    # the single-wavelength engine builds, so every wavelength shares it.
+    core_pos = base_params["output_positions"]
     return PhotonicLantern(
         core_pos, base_params["rcores"], base_params["rclad"], base_params["rjack"],
         base_params["ncores"], base_params["nclad"], base_params["njack"], base_params["z_ex"],

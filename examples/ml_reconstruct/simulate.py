@@ -52,7 +52,8 @@ def simulate_core_images(p, ifunc, coeff, n_train, *, prop12=None, window=5,
 
     # core centres on the mean image, matched to the ports
     centers, gx, gy, dx, dy = bp.calibrate_subpixel_centers(
-        intensity.mean(axis=0), mesh, grid_resolution=grid_resolution)
+        intensity.mean(axis=0), mesh, grid_resolution=grid_resolution,
+        n_expected=p["n_output_positions"])
     port_xy = output_core_xy(p)
     port_of = bp.map_evaluated_to_ideal_geometry(centers, port_xy)   # detected k -> port
     centers_by_port = np.asarray(centers)[np.argsort(port_of)]

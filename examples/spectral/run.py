@@ -1,4 +1,4 @@
-"""Standalone demo: simulate 19 fiber spectra, disperse, extract, score."""
+"""Standalone demo: simulate 7 fiber spectra, disperse, extract, score."""
 from __future__ import annotations
 import numpy as np
 
@@ -15,18 +15,18 @@ def example_spectral_extraction():
     print("=" * 70)
 
     config = SpectralConfig(
-        lambda_min=700.0, lambda_max=900.0, n_spectral_bins=200,
+        lambda_min=1100.0, lambda_max=1300.0, n_spectral_bins=200,
         fiber_spacing_pixels=8.0, psf_fwhm_pixels=2.5,
     )
     simulator = SpectralImageSimulator(config)
     extractor = SpectralExtractor(config)
 
-    # 19 fibers, each a Gaussian emission line at a different wavelength on a
-    # per-fiber continuum.
-    n_fibers = 19
+    # 7 fibers (one per lantern port), each a Gaussian emission line at a
+    # different wavelength on a per-fiber continuum.
+    n_fibers = 7
     spectra_true = np.zeros((config.n_spectral_bins, n_fibers))
     for i in range(n_fibers):
-        line_center = 750.0 + i * 5.0   # nm
+        line_center = 1150.0 + i * 15.0  # nm
         line_width = 2.0                # nm
         amplitude = 1000.0 + i * 50.0   # counts
         line_profile = amplitude * np.exp(
@@ -47,13 +47,13 @@ def example_spectral_extraction():
 
     visualize_extracted_spectra(
         spectra_extracted, simulator.wavelengths, variance,
-        fiber_indices=[0, 5, 10, 15, 18])
+        fiber_indices=[0, 2, 4, 6])
     visualize_all_spectra_grid(spectra_extracted, simulator.wavelengths)
 
     print("\n" + "=" * 70)
     print("EXTRACTION QUALITY METRICS")
     print("=" * 70)
-    for i in [0, 5, 10, 15, 18]:
+    for i in [0, 2, 4, 6]:
         residual = spectra_extracted[:, i] - spectra_true[:, i]
         rms = np.sqrt(np.mean(residual ** 2))
         finite_var = variance[:, i][np.isfinite(variance[:, i])]

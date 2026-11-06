@@ -213,7 +213,7 @@ def diagnose_mode_bookkeeping(
     wavelength_nm: float,
     *,
     PL_N: Optional[PhotonicLantern] = None,
-    n_modes: int = 20,
+    n_modes: Optional[int] = None,
     **infer_kwargs,
 ) -> Tuple[List[List[int]], List[List[int]], List[int]]:
     """
@@ -226,6 +226,9 @@ def diagnose_mode_bookkeeping(
     # that the two endpoint solves replace
     infer_kwargs.pop("n_probe", None)
     infer_kwargs.pop("z_split", None)
+
+    if n_modes is None:
+        n_modes = base_params["n_output_positions"] + 1
 
     p_lambda = scale_params_to_wavelength(base_params, wavelength_nm)
     PL_N     = PL_N if PL_N is not None else build_lantern_geometry(p_lambda)

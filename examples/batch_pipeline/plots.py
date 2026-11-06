@@ -7,7 +7,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.interpolate import griddata
 from scipy.ndimage import uniform_filter, map_coordinates
 
-from .constants import N_SIGNALS, DEFAULT_GRID_RESOLUTION
+from .constants import DEFAULT_GRID_RESOLUTION
 from .analysis import (
     calibrate_subpixel_centers, collect_subpixel_signals,
     map_evaluated_to_ideal_geometry,
@@ -443,7 +443,7 @@ def visualize_batch_hex_grid_signals(
 
     # Pass the 1D combined intensity profile instead of the raw 2D modes matrix
     core_centers, _, _, dx, dy = calibrate_subpixel_centers(
-        total_modes_profile, mesh_final)
+        total_modes_profile, mesh_final, n_expected=pipeline.p["n_output_positions"])
     # =====================================================================
 
     ideal_permutation = map_evaluated_to_ideal_geometry(

@@ -62,8 +62,8 @@ def plot_fiber_spectra(
     wl_nm         : ndarray, shape (n_wl,)
     field_idx     : int
     fiber_indices : sequence of int, optional
-        Which fibers to plot. Defaults to all fibers (can get busy for
-        19 -- use plot_spectra_grid() for a clearer all-fiber view).
+        Which fibers to plot. Defaults to all fibers (use
+        plot_spectra_grid() for one subplot per fiber).
     ax : matplotlib Axes, optional
         Draw onto this axes; if None a new figure is made and shown.
     title : str, optional
@@ -104,11 +104,11 @@ def plot_spectra_grid(
 ):
     """
     Plot every fiber's spectrum for one field in its own small subplot
-    (4x5 grid, matching the 19-fiber layout), so you can see all of them
+    (a grid of up to 4 columns), so you can see all of them
     without an overcrowded single-axes overlay.
     """
     n_fibers = power_spectra.shape[2]
-    n_cols = 5
+    n_cols = min(4, n_fibers)
     n_rows = int(np.ceil(n_fibers / n_cols))
 
     with _figure(nrows=n_rows, ncols=n_cols,

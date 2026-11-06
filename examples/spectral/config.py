@@ -8,8 +8,8 @@ class SpectralConfig:
     """Configuration parameters for spectral extraction."""
 
     # Wavelength range
-    lambda_min: float = 700.0      # nm
-    lambda_max: float = 900.0      # nm
+    lambda_min: float = 1100.0     # nm
+    lambda_max: float = 1300.0     # nm
     n_spectral_bins: int = 200     # spectral resolution elements
 
     # Slit geometry

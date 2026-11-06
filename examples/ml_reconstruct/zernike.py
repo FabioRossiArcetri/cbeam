@@ -1,8 +1,8 @@
 """Noll-ordered Zernike polynomials sampled at the lantern's output cores.
 
 Projecting the per-core signals onto this basis is a change of
-representation, not a reduction: with 19 cores the sampled basis has rank 19
-at most, so any number of modes beyond that spans the same space (and a
+representation, not a reduction: with N cores the sampled basis has rank N
+at most (7 for the 7-port lantern), so any number of modes beyond that spans the same space (and a
 degree-d polynomial in the modal coefficients spans the same functions as a
 degree-d polynomial in the raw signals).
 """

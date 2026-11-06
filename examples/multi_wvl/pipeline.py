@@ -5,7 +5,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
-from batch_pipeline.constants import default_gen_chunk_size, N_SIGNALS
+from batch_pipeline.constants import default_gen_chunk_size
 from batch_pipeline.engine import BatchPropagationPipeline
 from cbeam.propagator import ChainPropagator
 
@@ -69,10 +69,10 @@ class MultiWavelengthPropagationPipeline:
         mwp = MultiWavelengthPropagationPipeline(
             base_params=get_simulation_parameters(),
             ifunc=ifunc,
-            native_wavelengths_nm=np.linspace(700, 900, 21),  # coarse solve grid
+            native_wavelengths_nm=np.linspace(1100, 1300, 21),  # coarse solve grid
         )
         power, wl_out = mwp.get_power_spectra(
-            coeff_matrix, output_wavelengths_nm=np.linspace(700, 900, 200)
+            coeff_matrix, output_wavelengths_nm=np.linspace(1100, 1300, 200)
         )  # power: (200, n_fields, n_fibers)
 
     Memory model
@@ -119,25 +119,26 @@ class MultiWavelengthPropagationPipeline:
         base_params: dict,
         ifunc,
         native_wavelengths_nm: Sequence[float],
-        n_fibers: int = N_SIGNALS,
+        n_fibers: Optional[int] = None,
         field_gen_on_gpu: bool = False,
         field_gen_chunk_size: Optional[int] = default_gen_chunk_size,
         cache_engines: bool = False,
-        auto_mode_bookkeeping: bool = False,
+        auto_mode_bookkeeping: Optional[bool] = None,
         verbose: bool = True,
     ):
         self.base_params = base_params
         self.ifunc = ifunc
         self.native_wavelengths_nm = np.asarray(
             sorted(native_wavelengths_nm), dtype=np.float64)
-        self.n_fibers = n_fibers
+        # one channel per output core of this lantern
+        self.n_fibers = base_params["n_output_positions"] if n_fibers is None else n_fibers
         self.field_gen_on_gpu = field_gen_on_gpu
         self.field_gen_chunk_size = field_gen_chunk_size
         self.cache_engines = cache_engines
         # Passed to build_and_characterize_lantern_at_wavelength: when a
         # wavelength has to be characterised from scratch, derive its
         # degen_groups / skipped_modes from an n_eff probe instead of
-        # reusing the 800 nm hard-coded config. No effect on cached
+        # reusing the hard-coded batch_pipeline.constants table. No effect on cached
         # wavelengths.
         self.auto_mode_bookkeeping = auto_mode_bookkeeping
         self.verbose = verbose

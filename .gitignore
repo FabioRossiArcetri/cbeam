@@ -15,3 +15,7 @@ docs/.doctrees
 .vscode
 # characterization cache written by the examples (./data relative to examples/)
 examples/data
+
+# executed-notebook logs and figure pickles of the example runs
+examples/runs/*/*.log
+examples/runs/*/figs/
