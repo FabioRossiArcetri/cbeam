@@ -90,6 +90,34 @@ def plot_field(field,mesh,ax=None,show_mesh=False):
 # Propagator
 # ---------------------------------------------------------------------------
 
+class _LazyModeSpline:
+    """The cubic spline of the mode fields in z, built only when a value between
+    the stored positions is asked for. Its coefficients are 4x the mode array
+    (GBs for a 19-port lantern), while propagation needs the modes only at the
+    stored ends (input projection, channel basis): there the stored modes are
+    returned as they are -- which the spline would return too, as it
+    interpolates them."""
+
+    def __init__(self, zs, vs):
+        self.zs = np.asarray(zs, dtype=float)
+        self.vs = vs
+        self._spline = None
+
+    def __call__(self, z):
+        if np.ndim(z) == 0:
+            i = int(np.argmin(np.abs(self.zs - float(z))))
+            if abs(self.zs[i] - float(z)) <= 1e-9 * max(1.0, abs(self.zs[i])):
+                return self.vs[i]
+        if self._spline is None:
+            self._spline = myCubicSpline(self.zs, self.vs, axis=0)
+        return self._spline(z)
+
+    def derivative(self, *a, **k):
+        if self._spline is None:
+            self._spline = myCubicSpline(self.zs, self.vs, axis=0)
+        return self._spline.derivative(*a, **k)
+
+
 class Propagator:
     """Class for coupled-mode propagation of tapered waveguides."""
 
@@ -1150,8 +1178,8 @@ class Propagator:
                 self.neffs_dif_funcs = [f.derivative()     for f in neff_funcs]
         
             if make_v and self.vs is not None:
-                self.get_v = myCubicSpline(zs, self.vs, axis=0)
-            
+                self.get_v = _LazyModeSpline(zs, self.vs)
+
     def make_interp_funcs_zinv(self):
         """Create interpolation callables for z-invariant waveguides."""
         #self.neffs_funcs = [lambda z: neff for neff in self.neffs[0]]

@@ -282,8 +282,8 @@ def test_reference_preset_unchanged():
     assert (p["rclad"], p["rjack"], p["taper_factor"], p["nclad"]) == (9.0, 27, 12.0, 1.444)
     assert p["rcore"] == pytest.approx(0.15) and p["ncore"] == pytest.approx(1.4528)
     assert p["njack"] == pytest.approx(1.4385)
-    assert p["psf_fill_factor"] == pytest.approx(0.30, abs=1e-12)
-    assert p["pixel_scale_um"] == pytest.approx(0.30 * 9.0 / (1.22 * 4), rel=1e-12)
+    assert p["psf_fill_factor"] == pytest.approx(0.50, abs=1e-12)
+    assert p["pixel_scale_um"] == pytest.approx(0.50 * 9.0 / (1.22 * 4), rel=1e-12)
     assert bp.characterization_tag(p) == "19port_0800"
     with pytest.raises(ValueError):
         bp.get_simulation_parameters(2, lantern="pl19_800")

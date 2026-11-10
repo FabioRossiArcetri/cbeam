@@ -26,7 +26,11 @@ def _v_number(rclad, wavelength_um, nclad, njack):
 _REF = LANTERNS["pl19_800"]
 V_MMF_REF = _v_number(_REF["rclad"], _REF["wavelength_um"], _REF["nclad"],
                       _REF["nclad"] + _REF["dn_jack"])
-PSF_FILL_REF = 0.30
+# 0.50: the Airy first-null radius is half the cladding radius, a beam NA 0.86x the
+# fibre NA -- 83% flat-wavefront coupling, against 43% for the earlier 0.30
+# (beam NA 1.4x the fibre NA), at nearly the same sensing quality (PLREC
+# scripts/fill_scan.py, 2026-11-08). The characterizations do not depend on it.
+PSF_FILL_REF = 0.50
 
 
 def _match_lantern(nrings, wavelength_um):
@@ -117,10 +121,10 @@ def get_simulation_parameters(nrings=None, wavelength_um=None, lantern=None):
     #
     # pixel_scale_um is then fixed by requiring the Airy radius to equal
     # psf_fill_factor * rclad in physical units, at the design wavelength.
-    # The reference lantern uses a fill of 0.30 (V = 8.90); every lantern
+    # The reference lantern uses a fill of PSF_FILL_REF = 0.50 (V = 8.90); every lantern
     # keeps the converging beam's NA relative to its multimode end's NA the
     # same as there: with r_airy = 0.61 lambda / NA_beam that is
-    # fill = 0.30 * V_ref / V (exactly 0.30 for pl19_800).
+    # fill = PSF_FILL_REF * V_ref / V (exactly PSF_FILL_REF for pl19_800).
     params["V_mmf"] = _v_number(params["rclad"], L["wavelength_um"], params["nclad"], params["njack"])
     psf_fill_factor = PSF_FILL_REF * V_MMF_REF / params["V_mmf"]
     params["psf_fill_factor"] = psf_fill_factor

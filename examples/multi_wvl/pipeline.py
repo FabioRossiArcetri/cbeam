@@ -199,6 +199,7 @@ class MultiWavelengthPropagationPipeline:
         use_gpu: Optional[bool] = None,
         gen_chunk_size: Optional[int] = None,
         prop_chunk_size: Optional[int] = None,
+        extra_opd_batch: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Propagate one batch of aberration configurations through the
@@ -212,6 +213,9 @@ class MultiWavelengthPropagationPipeline:
         use_gpu, gen_chunk_size, prop_chunk_size : passed straight through
             to each per-wavelength pipeline's generate_batch_modal_coefficients
             / propagate_batch calls.
+        extra_opd_batch : optional (n_fields, n_pupil_pixels) OPD [nm] added to
+            the modal OPD of each field (the same physical screen at every
+            wavelength), see BatchPropagationPipeline.generate_batch_modal_coefficients.
 
         Returns
         -------
@@ -255,7 +259,7 @@ class MultiWavelengthPropagationPipeline:
 
             u0_batch, eff_batch = engine.pipeline.generate_batch_modal_coefficients(
                 aberration_coeff_batch, use_gpu=use_gpu, chunk_size=gen_chunk_size,
-                return_coupling_efficiency=True,
+                return_coupling_efficiency=True, extra_opd_batch=extra_opd_batch,
             )
 
             uf_batch, _, _ = engine.pipeline.propagate_batch(u0_batch, chunk_size=prop_chunk_size)
@@ -360,6 +364,7 @@ class MultiWavelengthPropagationPipeline:
         use_gpu: Optional[bool] = None,
         gen_chunk_size: Optional[int] = None,
         prop_chunk_size: Optional[int] = None,
+        extra_opd_batch: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Convenience wrapper: propagate at all native wavelengths, optionally
@@ -382,6 +387,7 @@ class MultiWavelengthPropagationPipeline:
         spectra_complex = self.propagate_batch(
             aberration_coeff_batch, use_gpu=use_gpu,
             gen_chunk_size=gen_chunk_size, prop_chunk_size=prop_chunk_size,
+            extra_opd_batch=extra_opd_batch,
         )
 
         if output_wavelengths_nm is None:
