@@ -30,3 +30,6 @@ Besides cbeam's own requirements:
 
 The first run characterizes the lantern (several minutes per wavelength);
 later runs load the cached characterization from `examples/data/`.
+
+The CPU field generation runs its FFTs on all cores; set
+`CBEAM_FFT_WORKERS=1` when running several processes side by side.

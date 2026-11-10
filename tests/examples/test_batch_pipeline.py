@@ -201,6 +201,17 @@ def test_batch_collect_subpixel_signals():
     np.testing.assert_allclose(out, ref, rtol=1e-12)
 
 
+def test_extra_opd_adds_to_the_modal_opd():
+    """An extra OPD equal to a modal OPD gives the same field as the modes."""
+    ifunc = _synthetic_ifunc()
+    fg = IncidentFieldGenerator(_field_params(64), ifunc, xp=np)
+    coeffs = np.array([[120.0, -40.0, 60.0], [0.0, 90.0, -30.0]])
+    extra = coeffs @ fg.ifunc_matrix
+    np.testing.assert_allclose(
+        fg.generate_field_profiles_batch(np.zeros_like(coeffs), extra),
+        fg.generate_field_profiles_batch(coeffs), atol=1e-12)
+
+
 def test_earlier_method_names_still_work():
     assert IncidentFieldGenerator.apply_ef_to_lantern is IncidentFieldGenerator.apply_ef_to_waveguide
     assert (IncidentFieldGenerator.apply_ef_to_lantern_jax
@@ -235,6 +246,15 @@ def test_pipeline_on_a_single_propagator(save_dir):
     assert np.all(np.isfinite(eff) & (eff > 0))
     # the unaberrated PSF, centred on the fiber, excites mostly its fundamental mode
     assert np.abs(u0[0, 0]) ** 2 > 0.5
+
+    # an extra pupil OPD equal to the modal OPD, chunked or not, gives the same fields
+    extra = coeffs @ pipeline._field_gen_np.ifunc_matrix
+    for chunk_size in (None, 2):
+        u0_x = pipeline.generate_batch_modal_coefficients(
+            np.zeros_like(coeffs), chunk_size=chunk_size, extra_opd_batch=extra)
+        np.testing.assert_allclose(np.asarray(u0_x), u0, atol=1e-12)
+    with pytest.raises(ValueError):
+        pipeline.generate_batch_modal_coefficients(coeffs, extra_opd_batch=extra[:2])
 
     uf, zs, us = pipeline.propagate_batch(u0)
     np.testing.assert_allclose(np.sum(np.abs(np.asarray(uf)) ** 2, axis=1), 1.0, atol=1e-9)

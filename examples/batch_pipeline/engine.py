@@ -3,6 +3,7 @@
 Pure processing -- this module imports no matplotlib.
 """
 from __future__ import annotations
+import os
 import numpy as np
 import scipy.fft as sp_fft
 from scipy.spatial import Delaunay
@@ -38,6 +39,13 @@ def _jax_fft_batch(Ef_input_batch, pad_width):
 
 if backend == 'jax':
     _apply_pupil_jax_core = jax.jit(_jax_fft_batch, static_argnames=['pad_width'])
+
+
+# Threads of the CPU field-generation FFT: all cores by default.  Set
+# CBEAM_FFT_WORKERS=1 when running many processes side by side (e.g. dataset
+# chunks in parallel) -- scipy.fft ignores OMP_NUM_THREADS, so otherwise every
+# process starts one FFT thread per core and the host is oversubscribed.
+_FFT_WORKERS = int(os.environ.get("CBEAM_FFT_WORKERS", "-1"))
 
 
 def wavelength_tag(wavelength_nm: float) -> str:
@@ -337,9 +345,15 @@ class IncidentFieldGenerator:
         
         print(f"  Valid interpolation points: {np.sum(valid)} / {len(valid)}")
 
-    def generate_field_profiles_batch(self, coeff_batch):
-        """Generate complex electric field profiles from aberration coefficients."""
+    def generate_field_profiles_batch(self, coeff_batch, extra_opd_batch=None):
+        """Generate complex electric field profiles from aberration coefficients.
+
+        extra_opd_batch : optional (n_fields, n_pupil_pixels) OPD [nm] on the
+            pupil-mask pixels (in the mask's pixel order), added to the modal
+            OPD -- e.g. a phase screen outside the DM modal basis."""
         opd_flat_batch   = coeff_batch @ self.ifunc_matrix
+        if extra_opd_batch is not None:
+            opd_flat_batch = opd_flat_batch + extra_opd_batch
         phase_flat_batch = opd_flat_batch * (2 * self.xp.pi / self.p["wavelength_nm"])
         E_flat_batch     = self.xp.exp(1j * phase_flat_batch)
 
@@ -375,7 +389,7 @@ class IncidentFieldGenerator:
             sp_fft.fft2(
                 sp_fft.ifftshift(E_padded, axes=(1, 2)),
                 axes=(1, 2),
-                workers=-1,
+                workers=_FFT_WORKERS,
             ),
             axes=(1, 2),
         )
@@ -583,7 +597,7 @@ class BatchPropagationPipeline:
         return intensity_2d_batch, X_plot, Y_plot
 
     # ------------------------------------------------------------------
-    def _process_chunk(self, coeff_chunk, fg, proj, use_gpu):
+    def _process_chunk(self, coeff_chunk, fg, proj, use_gpu, extra_opd_chunk=None):
         """Run the field-generation pipeline on a single coefficient chunk.
 
         Returns ``(u0_chunk, eff_chunk)`` as plain numpy arrays of shape
@@ -595,7 +609,7 @@ class BatchPropagationPipeline:
         All intermediate arrays are local to this call and are released
         when it returns.
         """
-        Ef_input  = fg.generate_field_profiles_batch(coeff_chunk)
+        Ef_input  = fg.generate_field_profiles_batch(coeff_chunk, extra_opd_chunk)
         if use_gpu:
             E_focal = fg.apply_ef_to_waveguide_jax(Ef_input)
         else:
@@ -608,7 +622,8 @@ class BatchPropagationPipeline:
     def generate_batch_modal_coefficients(self, aberration_coeff_batch,
                                           use_gpu=None,
                                           chunk_size=None,
-                                          return_coupling_efficiency=False):
+                                          return_coupling_efficiency=False,
+                                          extra_opd_batch=None):
         """
         Generate batch modal coefficients from aberration configurations.
 
@@ -642,6 +657,10 @@ class BatchPropagationPipeline:
             When True, also return the per-field input coupling efficiency
             (see below).  Kept opt-in so existing callers that unpack a
             single return value keep working.
+        extra_opd_batch : array-like, shape (n_configs, n_pupil_pixels), optional
+            An OPD [nm] per configuration on the pupil-mask pixels (in the
+            mask's pixel order), added to the modal OPD -- for wavefront
+            errors outside the modal basis, such as a phase screen.
 
         Returns
         -------
@@ -704,6 +723,18 @@ class BatchPropagationPipeline:
             padded[:, :n_active_modes] = coeff_np
             coeff_np = padded
 
+        extra_np = None
+        if extra_opd_batch is not None:
+            extra_np = np.asarray(extra_opd_batch, dtype=np.float64)
+            if extra_np.shape != (n_configs, int(np.count_nonzero(fg.mask_np))):
+                raise ValueError(
+                    f"extra_opd_batch has shape {extra_np.shape}, expected "
+                    f"({n_configs}, {int(np.count_nonzero(fg.mask_np))}): one row per "
+                    f"configuration, one column per pupil-mask pixel")
+
+        def _extra(a, b):
+            return None if extra_np is None else self._to_device(extra_np[a:b], _use_gpu)
+
         # ------------------------------------------------------------------
         # Process in chunks.
         # ------------------------------------------------------------------
@@ -711,7 +742,7 @@ class BatchPropagationPipeline:
             # Single pass — no chunking overhead.
             coeff_chunk = self._to_device(coeff_np, _use_gpu)
             u0_batch, eff_batch = self._process_chunk(
-                coeff_chunk, fg, proj, _use_gpu)
+                coeff_chunk, fg, proj, _use_gpu, _extra(0, n_configs))
             if return_coupling_efficiency:
                 return u0_batch, eff_batch
             return u0_batch
@@ -726,7 +757,7 @@ class BatchPropagationPipeline:
             end         = min(start + _chunk_size, n_configs)
             coeff_chunk = self._to_device(coeff_np[start:end], _use_gpu)
             u0_chunk, eff_chunk = self._process_chunk(
-                coeff_chunk, fg, proj, _use_gpu)
+                coeff_chunk, fg, proj, _use_gpu, _extra(start, end))
             u0_chunks.append(u0_chunk)
             eff_chunks.append(eff_chunk)
             print(f"    field-gen chunk {start}–{end-1} done.", flush=True)

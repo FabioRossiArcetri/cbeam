@@ -443,7 +443,7 @@ def visualize_batch_hex_grid_signals(
 
     # Pass the 1D combined intensity profile instead of the raw 2D modes matrix
     core_centers, _, _, dx, dy = calibrate_subpixel_centers(
-        total_modes_profile, mesh_final)
+        total_modes_profile, mesh_final, n_expected=len(ideal_grid_positions))
     # =====================================================================
 
     ideal_permutation = map_evaluated_to_ideal_geometry(

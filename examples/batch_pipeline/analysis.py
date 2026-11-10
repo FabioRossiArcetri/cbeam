@@ -109,10 +109,13 @@ def _peak_centroids(intensity_2d, x0, y0, dx, dy, n_expected=N_SIGNALS,
 
 
 def calibrate_subpixel_centers(total_modes_profile, mesh_final,
-                               grid_resolution=CALIB_GRID_RESOLUTION):
+                               grid_resolution=CALIB_GRID_RESOLUTION, n_expected=None):
     """Find core centres to sub-pixel accuracy: resample the mesh profile onto a
     ``grid_resolution`` square grid, then run the shared self-healing peak
     finder (_peak_centroids).
+
+    n_expected: number of cores to find, e.g. the lantern's
+    ``p["n_output_positions"]``; None means N_SIGNALS (19).
 
     Returns ``(centers, plot_x_out, plot_y_out, dx, dy)`` -- the grid axes and
     spacing are returned because callers (e.g. visualize_batch_hex_grid_signals)
@@ -130,7 +133,7 @@ def calibrate_subpixel_centers(total_modes_profile, mesh_final,
     )
 
     centers = _peak_centroids(total_modes_2d, plot_x_out[0], plot_y_out[0], dx, dy,
-                              n_expected=N_SIGNALS)
+                              n_expected=N_SIGNALS if n_expected is None else n_expected)
     return centers, plot_x_out, plot_y_out, dx, dy
 
 

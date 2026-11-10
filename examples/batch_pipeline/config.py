@@ -62,8 +62,12 @@ def get_simulation_parameters(nrings=N_RINGS, wavelength_um=DEFAULT_WAVELENGTH_U
     # lantern mesh fell outside it -> "mesh points map outside FFT grid").
     #
     # pixel_scale_um is then fixed by requiring the Airy radius to equal
-    # psf_fill_factor * rclad in physical units.
-    psf_fill_factor = 0.30
+    # psf_fill_factor * rclad in physical units.  0.50 puts the Airy first
+    # null at half the cladding radius, a converging beam with 0.86x the NA of
+    # the multimode end: 83% flat-wavefront coupling at 800 nm, against 43%
+    # for the earlier 0.30 (beam NA 1.4x the fibre NA, PSF too small).  The
+    # characterizations do not depend on it.
+    psf_fill_factor = 0.50
     r_airy_px = 1.22 * params["pad_factor"]
     params["pixel_scale_um"] = psf_fill_factor * params["rclad"] / r_airy_px
 
