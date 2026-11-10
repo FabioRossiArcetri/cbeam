@@ -90,6 +90,40 @@ def plot_field(field,mesh,ax=None,show_mesh=False):
 # Propagator
 # ---------------------------------------------------------------------------
 
+class _LazyModeSpline:
+    """The cubic spline of the mode fields in z, built only when a value between
+    the stored positions is asked for. Its coefficients take 4x the memory of the
+    mode array (GBs for a 19-port lantern), while propagation and the channel
+    basis need the modes only at stored positions (usually the ends): there the
+    stored modes are returned as they are -- the spline interpolates them, so it
+    would return the same values.
+
+    make_spline: the spline constructor, called as make_spline(zs, vs) the first
+    time an in-between value (or a derivative) is needed.
+    """
+
+    def __init__(self, zs, vs, make_spline):
+        self.zs = np.asarray(zs, dtype=float)
+        self.vs = vs
+        self._make_spline = make_spline
+        self._spline = None
+
+    def _get_spline(self):
+        if self._spline is None:
+            self._spline = self._make_spline(self.zs, self.vs)
+        return self._spline
+
+    def __call__(self, z):
+        if np.ndim(z) == 0:
+            i = int(np.argmin(np.abs(self.zs - float(z))))
+            if abs(self.zs[i] - float(z)) <= 1e-9 * max(1.0, abs(self.zs[i])):
+                return self.vs[i]
+        return self._get_spline()(z)
+
+    def derivative(self, *args, **kwargs):
+        return self._get_spline().derivative(*args, **kwargs)
+
+
 class Propagator:
     """Class for coupled-mode propagation of tapered waveguides."""
 
@@ -1106,15 +1140,18 @@ class Propagator:
             # not-a-knot interpolant and costs zero device memory.
             if make_v and self.vs is not None:
                 import scipy.interpolate as _si
-                _vs_host = np.asarray(self.vs)
-                _zs_host = np.asarray(zs)
-                try:
-                    self.get_v = _si.CubicSpline(_zs_host, _vs_host, axis=0)
-                except (ValueError, TypeError):
-                    # older scipy: no direct complex support -> fit re/im apart
-                    _csr = _si.CubicSpline(_zs_host, _vs_host.real, axis=0)
-                    _csi = _si.CubicSpline(_zs_host, _vs_host.imag, axis=0)
-                    self.get_v = lambda z, _r=_csr, _i=_csi: _r(z) + 1j * _i(z)
+
+                def _host_spline(_zs, _vs):
+                    try:
+                        return _si.CubicSpline(_zs, _vs, axis=0)
+                    except (ValueError, TypeError):
+                        # older scipy: no direct complex support -> fit re/im apart
+                        _csr = _si.CubicSpline(_zs, _vs.real, axis=0)
+                        _csi = _si.CubicSpline(_zs, _vs.imag, axis=0)
+                        return lambda z, _r=_csr, _i=_csi: _r(z) + 1j * _i(z)
+
+                # built on first use only, see _LazyModeSpline
+                self.get_v = _LazyModeSpline(np.asarray(zs), np.asarray(self.vs), _host_spline)
 
             self._splines_ready = True
             # Bumped so _get_jax_step_fn() knows to rebuild+rejit the cached
@@ -1150,7 +1187,9 @@ class Propagator:
                 self.neffs_dif_funcs = [f.derivative()     for f in neff_funcs]
         
             if make_v and self.vs is not None:
-                self.get_v = myCubicSpline(zs, self.vs, axis=0)
+                # built on first use only, see _LazyModeSpline
+                self.get_v = _LazyModeSpline(
+                    zs, self.vs, lambda _zs, _vs: myCubicSpline(_zs, _vs, axis=0))
             
     def make_interp_funcs_zinv(self):
         """Create interpolation callables for z-invariant waveguides."""

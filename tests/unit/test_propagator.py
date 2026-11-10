@@ -443,3 +443,37 @@ class TestChainPropagator:
         assert float(zs[-1]) == pytest.approx(100.0)
         assert len(zs) >= 9  # 5 + 5, minus the shared junction point
         assert np.allclose(np.abs(us[-1]), np.abs(uf), atol=1e-8)
+
+
+# --------------------------------------------------------------------------- #
+# lazy mode-field spline
+# --------------------------------------------------------------------------- #
+class TestLazyModeSpline:
+    @staticmethod
+    def _data():
+        rng = np.random.default_rng(0)
+        zs = np.array([0.0, 1.0, 2.5, 4.0, 6.0])
+        vs = rng.normal(size=(5, 3, 7)) + 1j * rng.normal(size=(5, 3, 7))
+        return zs, vs
+
+    def test_stored_positions_need_no_spline(self):
+        from cbeam.propagator import _LazyModeSpline
+        zs, vs = self._data()
+        built = []
+        lazy = _LazyModeSpline(zs, vs, lambda z, v: built.append(1) or None)
+        for i, z in enumerate(zs):
+            np.testing.assert_array_equal(lazy(z), vs[i])
+        assert built == [] and lazy._spline is None
+
+    def test_matches_the_spline_in_between(self):
+        from scipy.interpolate import CubicSpline
+        from cbeam.propagator import _LazyModeSpline
+        zs, vs = self._data()
+        lazy = _LazyModeSpline(zs, vs, lambda z, v: CubicSpline(z, v, axis=0))
+        ref = CubicSpline(zs, vs, axis=0)
+        for z in (0.5, 3.3, 5.9):
+            np.testing.assert_allclose(lazy(z), ref(z), rtol=1e-12)
+        np.testing.assert_allclose(lazy(np.array([0.0, 2.0])), ref(np.array([0.0, 2.0])), rtol=1e-12)
+        np.testing.assert_allclose(lazy.derivative()(3.0), ref.derivative()(3.0), rtol=1e-12)
+        # stored positions still give the stored modes, as the spline does
+        np.testing.assert_allclose(lazy(zs[2]), ref(zs[2]), rtol=1e-12)
