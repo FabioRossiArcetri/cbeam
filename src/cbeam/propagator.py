@@ -1083,12 +1083,9 @@ class Propagator:
             if make_cmat and self.cmats is not None:
                 cmats_data = jnp.asarray(self.cmats, dtype=jnp.float64)
 
-                # Skew-symmetric form used inside the ODE
+                # Skew-symmetric form used inside the ODE, and by get_cmat()
                 cmats_skew       = 0.5 * (jnp.swapaxes(cmats_data, 1, 2) - cmats_data)
                 self._prop_M_spline    = myCubicSpline(zs_jnp, cmats_skew, axis=0)
-
-                # Full-matrix form used by get_cmat()
-                self._cmat_spline_jax  = myCubicSpline(zs_jnp, cmats_data, axis=0)
 
                 self.cmats_funcs  = None
                 self.cmats_spline = None
@@ -1173,10 +1170,12 @@ class Propagator:
     # =========================================================================
 
     def get_cmat(self,z):
-        """ using interpolation, compute the cross-coupling matrix at z """
+        """ using interpolation, compute the cross-coupling matrix at z: the
+        antisymmetrised 0.5*(C^T - C) of the stored coupling matrices C, which is
+        what the propagation uses (the same on both backends) """
         if self.backend == "jax":
-            # _cmat_spline_jax holds the full NxN matrix directly.
-            return self._cmat_spline_jax(z)
+            # the ODE's own skew-symmetric spline, as the numpy branch below
+            return self._prop_M_spline(z)
         else:
             # Reconstruct the anti-symmetric NxN matrix from packed coefficients.
             raw    = self.xp.array([c(z) for c in self.cmats_funcs])

@@ -192,6 +192,29 @@ class TestInterpolation:
         assert np.allclose(c, -c.T)
         assert c[0, 1] == pytest.approx(-c[1, 0])
 
+    def test_get_cmat_is_the_propagation_matrix(self, loaded):
+        # 0.5 * (C^T - C), the matrix both propagation paths use, on either backend
+        for z in (20.0, 40.0):
+            c = np.zeros((3, 3))
+            c[0, 1], c[1, 0] = 1e-3 * z, -1e-3 * z       # the fixture's C, linear in z
+            np.testing.assert_allclose(np.asarray(loaded.get_cmat(z)), 0.5 * (c.T - c), atol=1e-12)
+
+    def test_get_cmat_antisymmetrises(self, prop):
+        # stored matrices need not be exactly antisymmetric: get_cmat returns their
+        # antisymmetric part, as the propagation does
+        zs = np.linspace(0, 100, 6)
+        prop.Nmax = 3
+        prop.zs = zs
+        prop.neffs = np.tile([1.45, 1.44, 1.43], (len(zs), 1))
+        prop.cmats = np.zeros((len(zs), 3, 3))
+        prop.cmats[:, 0, 1] = 1e-3 * zs
+        prop.cmats[:, 1, 0] = -3e-3 * zs
+        prop.cmats[:, 1, 2] = 2e-3
+        prop.vs = np.zeros((len(zs), 3, 8))
+        prop.make_interp_funcs()
+        c = prop.cmats[2]
+        np.testing.assert_allclose(np.asarray(prop.get_cmat(zs[2])), 0.5 * (c.T - c), atol=1e-12)
+
     def test_int_neff_is_antiderivative(self, loaded):
         # d/dz of the integral == the value
         z = 40.0
